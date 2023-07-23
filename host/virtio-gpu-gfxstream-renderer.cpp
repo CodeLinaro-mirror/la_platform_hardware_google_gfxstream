@@ -46,9 +46,9 @@
 extern "C" {
 #include "drm_fourcc.h"
 #include "host-common/goldfish_pipe.h"
-#include "virgl_hw.h"
 #include "render-utils/virtio-gpu-gfxstream-renderer-unstable.h"
 #include "render-utils/virtio-gpu-gfxstream-renderer.h"
+#include "virgl_hw.h"
 }  // extern "C"
 
 #if defined(_WIN32)
@@ -549,8 +549,7 @@ class PipeVirglRenderer {
             GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
                 << "Could not get address space device control ops!";
         }
-        mVirtioGpuTimelines =
-            VirtioGpuTimelines::create(true);
+        mVirtioGpuTimelines = VirtioGpuTimelines::create(true);
         VGPLOG("done");
         return 0;
     }
@@ -590,7 +589,6 @@ class PipeVirglRenderer {
 
     int createContext(VirtioGpuCtxId ctx_id, uint32_t nlen, const char* name,
                       uint32_t context_init) {
-
         std::string contextName(name, nlen);
 
         VGPLOG("ctxid: %u len: %u name: %s", ctx_id, nlen, contextName.c_str());
@@ -682,7 +680,7 @@ class PipeVirglRenderer {
     type variable = {};               \
     memcpy(&variable, input, sizeof(type));
 
-    void addressSpaceProcessCmd(VirtioGpuCtxId ctxId, uint32_t* dwords, int dwordCount) {
+    void addressSpaceProcessCmd(VirtioGpuCtxId ctxId, uint32_t* dwords) {
         DECODE(header, gfxstream::gfxstreamHeader, dwords)
 
         switch (header.opCode) {
@@ -738,21 +736,23 @@ class PipeVirglRenderer {
         }
     }
 
-    int submitCmd(VirtioGpuCtxId ctxId, void* buffer, int dwordCount) {
-        // TODO(kaiyili): embed the ring_idx into the command buffer to make it possible to dispatch
-        // commands on different ring.
+    int submitCmd(struct stream_renderer_command* cmd) {
+        if (!cmd) return -EINVAL;
+
+        void* buffer = reinterpret_cast<void*>(cmd->cmd);
+
         VirtioGpuRing ring = VirtioGpuRingGlobal{};
         VGPLOG("ctx: %" PRIu32 ", ring: %s buffer: %p dwords: %d", ctxId, to_string(ring).c_str(),
-               buffer, dwordCount);
+               buffer, cmd->cmd_size);
 
         if (!buffer) {
             fprintf(stderr, "%s: error: buffer null\n", __func__);
-            return -1;
+            return -EINVAL;
         }
 
-        if (dwordCount < 1) {
-            fprintf(stderr, "%s: error: not enough dwords (got %d)\n", __func__, dwordCount);
-            return -1;
+        if (cmd->cmd_size < 4) {
+            fprintf(stderr, "%s: error: not enough bytes (got %d)\n", __func__, cmd->cmd_size);
+            return -EINVAL;
         }
 
         DECODE(header, gfxstream::gfxstreamHeader, buffer);
@@ -760,7 +760,7 @@ class PipeVirglRenderer {
             case GFXSTREAM_CONTEXT_CREATE:
             case GFXSTREAM_CONTEXT_PING:
             case GFXSTREAM_CONTEXT_PING_WITH_RESPONSE:
-                addressSpaceProcessCmd(ctxId, (uint32_t*)buffer, dwordCount);
+                addressSpaceProcessCmd(cmd->ctx_id, (uint32_t*)buffer);
                 break;
             case GFXSTREAM_CREATE_EXPORT_SYNC: {
                 DECODE(exportSync, gfxstream::gfxstreamCreateExportSync, buffer)
@@ -782,7 +782,7 @@ class PipeVirglRenderer {
                 // the same ring as the fence created for the virtio gpu command or the
                 // fence may be signaled without properly waiting for the task to complete.
                 ring = VirtioGpuRingContextSpecific{
-                    .mCtxId = ctxId,
+                    .mCtxId = cmd->ctx_id,
                     .mRingIdx = 0,
                 };
 
@@ -807,7 +807,7 @@ class PipeVirglRenderer {
                 // the same ring as the fence created for the virtio gpu command or the
                 // fence may be signaled without properly waiting for the task to complete.
                 ring = VirtioGpuRingContextSpecific{
-                    .mCtxId = ctxId,
+                    .mCtxId = cmd->ctx_id,
                     .mRingIdx = 0,
                 };
 
@@ -1036,7 +1036,6 @@ class PipeVirglRenderer {
     }
 
     int attachIov(int resId, iovec* iov, int num_iovs) {
-
         VGPLOG("resid: %d numiovs: %d", resId, num_iovs);
 
         auto it = mResources.find(resId);
@@ -1051,7 +1050,6 @@ class PipeVirglRenderer {
     }
 
     void detachIov(int resId, iovec** iov, int* num_iovs) {
-
         auto it = mResources.find(resId);
         if (it == mResources.end()) return;
 
@@ -1300,13 +1298,13 @@ class PipeVirglRenderer {
         return ret;
     }
 
-    void getCapset(uint32_t set, uint32_t *max_size) {
+    void getCapset(uint32_t set, uint32_t* max_size) {
         // Only one capset right not
         *max_size = sizeof(struct gfxstream::gfxstreamCapset);
     }
 
     void fillCaps(uint32_t set, void* caps) {
-        struct gfxstream::gfxstreamCapset *capset =
+        struct gfxstream::gfxstreamCapset* capset =
             reinterpret_cast<struct gfxstream::gfxstreamCapset*>(caps);
         if (capset) {
             memset(capset, 0, sizeof(*capset));
@@ -1323,9 +1321,9 @@ class PipeVirglRenderer {
             if (vk_emu && vk_emu->live) {
                 capset->deferredMapping = 1;
 #if defined(__APPLE__) && defined(__arm64__)
-		capset->blobAlignment = 16384;
+                capset->blobAlignment = 16384;
 #else
-		capset->blobAlignment = 4096;
+                capset->blobAlignment = 4096;
 #endif
             }
         }
@@ -1522,7 +1520,6 @@ class PipeVirglRenderer {
     }
 
     int resourceMap(uint32_t res_handle, void** hvaOut, uint64_t* sizeOut) {
-
         if (feature_is_enabled(kFeature_ExternalBlob)) return -EINVAL;
 
         auto it = mResources.find(res_handle);
@@ -1584,7 +1581,6 @@ class PipeVirglRenderer {
     }
 
     int exportBlob(uint32_t res_handle, struct stream_renderer_handle* handle) {
-
         auto it = mResources.find(res_handle);
         if (it == mResources.end()) {
             return -EINVAL;
@@ -1655,9 +1651,7 @@ class PipeVirglRenderer {
     }
 
 #ifdef CONFIG_AEMU
-    void setServiceOps(const GoldfishPipeServiceOps* ops) {
-        mServiceOps = ops;
-    }
+    void setServiceOps(const GoldfishPipeServiceOps* ops) { mServiceOps = ops; }
 #endif  // CONFIG_AEMU
    private:
     void allocResource(PipeResEntry& entry, iovec* iov, int num_iovs) {
@@ -1764,8 +1758,8 @@ VG_EXPORT void stream_renderer_context_destroy(uint32_t handle) {
     sRenderer()->destroyContext(handle);
 }
 
-VG_EXPORT int stream_renderer_submit_cmd(void* buffer, int ctx_id, int dwordCount) {
-    return sRenderer()->submitCmd(ctx_id, buffer, dwordCount);
+VG_EXPORT int stream_renderer_submit_cmd(struct stream_renderer_command* cmd) {
+    return sRenderer()->submitCmd(cmd);
 }
 
 VG_EXPORT int stream_renderer_transfer_read_iov(uint32_t handle, uint32_t ctx_id, uint32_t level,
@@ -1985,7 +1979,8 @@ static const GoldfishPipeServiceOps goldfish_pipe_service_ops = {
     [](QEMUFile* file) { (void)file; },
 };
 
-static int stream_renderer_opengles_init(uint32_t display_width, uint32_t display_height, int renderer_flags) {
+static int stream_renderer_opengles_init(uint32_t display_width, uint32_t display_height,
+                                         int renderer_flags) {
     GFXS_LOG("start. display dimensions: width %u height %u, renderer flags: 0x%x", display_width,
              display_height, renderer_flags);
 
