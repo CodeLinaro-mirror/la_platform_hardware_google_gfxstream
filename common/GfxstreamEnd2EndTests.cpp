@@ -265,21 +265,21 @@ TestingVirtGpuDevice::~TestingVirtGpuDevice() {
 int64_t TestingVirtGpuDevice::getDeviceHandle() { return -1; }
 
 VirtGpuCaps TestingVirtGpuDevice::getCaps() {
-        VirtGpuCaps caps = {
-        .params = {
-            [kParam3D] = 1,
-            [kParamCapsetFix] = 1,
-            [kParamResourceBlob] = 1,
-            [kParamHostVisible] = 1,
-            [kParamCrossDevice] = 0,
-            [kParamContextInit] = 1,
-            [kParamSupportedCapsetIds] = 0,
-            [kParamCreateGuestHandle] = 0,
-        },
+    VirtGpuCaps caps = {
+        .params =
+            {
+                [kParam3D] = 1,
+                [kParamCapsetFix] = 1,
+                [kParamResourceBlob] = 1,
+                [kParamHostVisible] = 1,
+                [kParamCrossDevice] = 0,
+                [kParamContextInit] = 1,
+                [kParamSupportedCapsetIds] = 0,
+                [kParamCreateGuestHandle] = 0,
+            },
     };
 
-    stream_renderer_fill_caps(0, 0, &caps.gfxstreamCapset);
-
+    stream_renderer_fill_caps(static_cast<uint32_t>(kCapsetGfxStreamVulkan), 0, &caps.vulkanCapset);
     return caps;
 }
 
@@ -1129,8 +1129,8 @@ void GfxstreamEnd2EndTest::SetUp() {
     mGralloc = std::make_unique<TestingVirtGpuGralloc>(mDevice);
     HostConnection::get()->setGrallocHelperForTesting(mGralloc.get());
 
-    mSync = std::make_unique<TestingVirtGpuSyncHelper>(mDevice);
-    HostConnection::get()->setSyncHelperForTesting(mSync.get());
+    mSync = new TestingVirtGpuSyncHelper(mDevice);
+    HostConnection::get()->setSyncHelperForTesting(mSync);
 
     if (params.with_gl) {
         mGl = SetupGuestGl();
@@ -1161,7 +1161,6 @@ void GfxstreamEnd2EndTest::TearDownGuest() {
 
     mAnwHelper.reset();
     mDevice.reset();
-    mSync.reset();
 
     // Figure out more reliable way for guest shutdown to complete...
     std::this_thread::sleep_for(std::chrono::seconds(3));

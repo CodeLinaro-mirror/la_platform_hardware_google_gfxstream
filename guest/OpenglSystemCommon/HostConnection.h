@@ -141,13 +141,6 @@ private:
     uint64_t m_dmaPhysAddr;
 };
 
-// Abstraction for process pipe helper
-class ProcessPipe {
-public:
-    virtual bool processPipeInit(int stream_handle, HostConnectionType connType, renderControl_encoder_context_t *rcEnc) = 0;
-    virtual ~ProcessPipe() {}
-};
-
 struct EGLThreadInfo;
 
 class HostConnection
@@ -178,8 +171,8 @@ public:
     gfxstream::Gralloc* grallocHelper() { return m_grallocHelper; }
     void setGrallocHelperForTesting(gfxstream::Gralloc* gralloc) { m_grallocHelper = gralloc; }
 
-    gfxstream::SyncHelper* syncHelper() { return m_syncHelper; }
-    void setSyncHelperForTesting(gfxstream::SyncHelper* sync) { m_syncHelper = sync;}
+    gfxstream::SyncHelper* syncHelper() { return m_syncHelper.get(); }
+    void setSyncHelperForTesting(gfxstream::SyncHelper* sync) { m_syncHelper.reset(sync); }
 
     gfxstream::ANativeWindowHelper* anwHelper() { return m_anwHelper; }
     void setANativeWindowHelperForTesting(gfxstream::ANativeWindowHelper* anw) { m_anwHelper = anw; }
@@ -262,8 +255,7 @@ private:
     ChecksumCalculator m_checksumHelper;
     gfxstream::ANativeWindowHelper* m_anwHelper = nullptr;
     gfxstream::Gralloc* m_grallocHelper = nullptr;
-    gfxstream::SyncHelper* m_syncHelper = nullptr;
-    ProcessPipe* m_processPipe = nullptr;
+    std::unique_ptr<gfxstream::SyncHelper> m_syncHelper;
     std::string m_hostExtensions;
     bool m_noHostError;
 #ifdef GFXSTREAM
