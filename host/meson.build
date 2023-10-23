@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 inc_stream_servers = include_directories('.')
+inc_host_include = include_directories('include')
 
 subdir('apigen-codec-common')
 
 inc_gfxstream_backend = [inc_root, inc_include, inc_apigen_codec, inc_utils,
-                         inc_gl_host_common]
+                         inc_gl_host_common, inc_host_include]
 
 link_gfxstream_backend = [lib_gl_host_common]
 
@@ -76,7 +77,10 @@ elif host_machine.system() == 'windows'
 elif host_machine.system() == 'linux'
   files_lib_gfxstream_backend += files('NativeSubWindow_x11.cpp')
 elif host_machine.system() == 'qnx'
-  files_lib_gfxstream_backend += files('NativeSubWindow_qnx.cpp')
+  files_lib_gfxstream_backend += files(
+    'NativeSubWindow_qnx.cpp',
+    '../qnx/host/platform_qnx.cpp',
+  )
 endif
 
 gfxstream_backend_cpp_args = [
@@ -94,7 +98,11 @@ deps_gfxstream_backend = [
 ]
 
 if host_machine.system() == 'qnx'
-  deps_gfxstream_backend += qnx_screen_dep
+  deps_gfxstream_backend += [
+    qnx_egl_dep,
+    qnx_gles2_dep,
+    qnx_screen_dep,
+  ]
 endif
 
 gfxstream_backend = library(

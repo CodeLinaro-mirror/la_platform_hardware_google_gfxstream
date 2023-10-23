@@ -71,10 +71,16 @@ if host_machine.system() == 'qnx'
   qnx_screen_lib = cc.find_library('screen', required : true)
   qnx_screen_dep = declare_dependency(include_directories: inc_qnx_headers, dependencies: [qnx_screen_lib])
 
+  qnx_egl_lib = cc.find_library('EGL', required : true)
+  qnx_egl_dep = declare_dependency(include_directories: inc_qnx_headers, dependencies: [qnx_egl_lib])
+
+  qnx_gles2_lib = cc.find_library('GLESv2', required : true)
+  qnx_gles2_dep = declare_dependency(include_directories: inc_qnx_headers, dependencies: [qnx_gles2_lib])
+
 else
   aemu_base_dep = dependency('aemu_base')
   aemu_common_dep = dependency('aemu_host_common')
-  aemu_logging_dep = dependency('logging_base')
+  aemu_logging_dep = dependency('aemu_logging')
   aemu_snapshot_dep = dependency('aemu_snapshot')
 endif
 
@@ -125,8 +131,8 @@ endif
 #===============#
 
 gfxstream_headers = files(
-  'include/render-utils/virtio-gpu-gfxstream-renderer.h',
-  'include/render-utils/virtio-gpu-gfxstream-renderer-unstable.h')
+  'host/include/gfxstream/virtio-gpu-gfxstream-renderer.h',
+  'host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h')
 
 inc_root = include_directories('.')
 inc_include = include_directories('include')
