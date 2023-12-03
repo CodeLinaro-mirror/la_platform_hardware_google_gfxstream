@@ -51,9 +51,11 @@ cc_library_shared {
         "gfxstream_glm",
         "gfxstream_compressedTextures",
         "gfxstream_emulated_textures",
+        "libgfxstream_etc",
     ],
     export_static_lib_headers: [
         "gfxstream_base",
+        "gfxstream_gl_host_common",
         "gfxstream_gles2_dec",
         "gfxstream_glsnapshot",
         "gfxstream_magma_server",
