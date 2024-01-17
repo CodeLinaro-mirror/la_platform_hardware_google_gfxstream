@@ -13,21 +13,19 @@
 // limitations under the License.
 #pragma once
 
-#include "render-utils/Renderer.h"
+#include <memory>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
+#include "RenderThread.h"
 #include "RenderWindow.h"
-
 #include "aemu/base/Compiler.h"
 #include "aemu/base/synchronization/Lock.h"
 #include "aemu/base/synchronization/MessageChannel.h"
 #include "aemu/base/threads/FunctorThread.h"
+#include "render-utils/Renderer.h"
 #include "snapshot/common.h"
-
-#include "RenderThread.h"
-
-#include <memory>
-#include <utility>
-#include <vector>
 
 namespace android_studio {
     class EmulatorGLESUsages;
@@ -45,7 +43,8 @@ public:
     void finish() override;
 
 public:
-    RenderChannelPtr createRenderChannel(android::base::Stream* loadStream) final;
+    RenderChannelPtr createRenderChannel(
+        android::base::Stream* loadStream, uint32_t virtioGpuContextId) final;
 
     void* addressSpaceGraphicsConsumerCreate(
         struct asg_context,
@@ -102,7 +101,7 @@ public:
     struct AndroidVirtioGpuOps* getVirtioGpuOps() final;
 
     void pauseAllPreSave() final;
-    void resumeAll() final;
+    void resumeAll(bool waitForSave = true) final;
 
     void save(android::base::Stream* stream,
               const android::snapshot::ITextureSaverPtr& textureSaver) final;
@@ -149,6 +148,9 @@ private:
     std::unique_ptr<RenderThread> mLoaderRenderThread;
 
     std::vector<RenderThread*> mAdditionalPostLoadRenderThreads;
+
+    android::base::Lock mAddressSpaceRenderThreadLock;
+    std::unordered_set<RenderThread*> mAddressSpaceRenderThreads;
 };
 
 }  // namespace gfxstream

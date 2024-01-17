@@ -19,11 +19,15 @@ package {
 cc_library_shared {
     name: "libgfxstream_backend",
     defaults: [ "gfxstream_defaults" ],
+    vendor_available: true,
     cflags: [
         "-Wno-unused-parameter",
         "-Wno-unused-variable",
         "-Wno-unused-function",
         "-Wno-unreachable-code-loop-increment",
+    ],
+    header_libs: [
+        "gfxstream_opengl_headers",
     ],
     static_libs: [
         "gfxstream_base",
@@ -47,9 +51,11 @@ cc_library_shared {
         "gfxstream_glm",
         "gfxstream_compressedTextures",
         "gfxstream_emulated_textures",
+        "libgfxstream_etc",
     ],
     export_static_lib_headers: [
         "gfxstream_base",
+        "gfxstream_gl_host_common",
         "gfxstream_gles2_dec",
         "gfxstream_glsnapshot",
         "gfxstream_magma_server",
@@ -87,6 +93,7 @@ cc_library_shared {
         "FrameBuffer.cpp",
         "GfxStreamAgents.cpp",
         "virtio-gpu-gfxstream-renderer.cpp",
+        "virtio-gpu-gfxstream-renderer-goldfish.cpp",
         "VirtioGpuTimelines.cpp",
         "VsyncThread.cpp",
     ],
@@ -100,7 +107,7 @@ cc_library_shared {
         android: {
             srcs: ["NativeSubWindow_android.cpp",],
         }
-    }
+    },
 }
 
 cc_test_library {
@@ -114,6 +121,9 @@ cc_test_library {
         "tests/OpenGLTestContext.cpp",
         "tests/SampleApplication.cpp",
         "tests/ShaderUtils.cpp",
+    ],
+    header_libs: [
+        "gfxstream_opengl_headers",
     ],
     shared_libs: [
         "libbase",
@@ -173,6 +183,9 @@ cc_test_host {
         "tests/testdata/256x256_golden_multiple_targets_7.png",
         "tests/testdata/256x256_golden_multiple_targets_8.png",
         "tests/testdata/256x256_golden_multiple_targets_9.png",
+        "tests/testdata/256x256_golden_solid_color.png",
+        "tests/testdata/256x256_golden_solid_color_above.png",
+        "tests/testdata/256x256_golden_solid_color_below.png",
         "tests/testdata/256x256_golden_transform_none.png",
         "tests/testdata/256x256_golden_transform_fliph.png",
         "tests/testdata/256x256_golden_transform_flipv.png",

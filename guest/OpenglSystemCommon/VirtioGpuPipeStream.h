@@ -17,8 +17,8 @@
 #pragma once
 
 #include "HostConnection.h"
-#include "IOStream.h"
 #include "VirtGpu.h"
+#include "gfxstream/guest/IOStream.h"
 
 #include <stdlib.h>
 
@@ -65,8 +65,6 @@ private:
     // intermediate buffer
     size_t m_bufsize;
     unsigned char *m_buf;
-    size_t m_read;
-    size_t m_readLeft;
 
     size_t m_writtenPos;
 };

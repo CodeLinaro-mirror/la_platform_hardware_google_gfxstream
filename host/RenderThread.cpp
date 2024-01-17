@@ -78,10 +78,12 @@ static constexpr int kMinThreadsToRunUnlimited = 5;
 static android::base::Lock sThreadRunLimiter;
 
 RenderThread::RenderThread(RenderChannelImpl* channel,
-                           android::base::Stream* loadStream)
+                           android::base::Stream* loadStream,
+                           uint32_t virtioGpuContextId)
     : android::base::Thread(android::base::ThreadFlags::MaskSignals, 2 * 1024 * 1024),
       mChannel(channel),
-      mRunInLimitedMode(android::base::getCpuCoreCount() < kMinThreadsToRunUnlimited)
+      mRunInLimitedMode(android::base::getCpuCoreCount() < kMinThreadsToRunUnlimited),
+      mContextId(virtioGpuContextId)
 {
     if (loadStream) {
         const bool success = loadStream->getByte();
@@ -138,7 +140,7 @@ void RenderThread::pausePreSnapshot() {
     }
 }
 
-void RenderThread::resume() {
+void RenderThread::resume(bool waitForSave) {
     AutoLock lock(mLock);
     // This function can be called for a thread from pre-snapshot loading
     // state; it doesn't need to do anything.
@@ -146,7 +148,10 @@ void RenderThread::resume() {
         return;
     }
     if (mRingStream) mRingStream->resume();
-    waitForSnapshotCompletion(&lock);
+    if (waitForSave) {
+        waitForSnapshotCompletion(&lock);
+    }
+    mNeedReloadProcessResources = true;
     mStream.clear();
     mState = SnapshotState::Empty;
     if (mChannel) mChannel->resume();
@@ -390,6 +395,10 @@ intptr_t RenderThread::main() {
 
                 tInfo.postLoadRefreshCurrentContextSurfacePtrs();
                 needRestoreFromSnapshot = false;
+            }
+            if (mNeedReloadProcessResources) {
+                processResources = nullptr;
+                mNeedReloadProcessResources = false;
             }
         }
 
