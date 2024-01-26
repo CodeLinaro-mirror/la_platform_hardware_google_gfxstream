@@ -1775,6 +1775,7 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_KHR_descriptor_update_template",
         "VK_KHR_storage_buffer_storage_class",
         "VK_EXT_depth_clip_enable",
+        "VK_KHR_create_renderpass2",
 #if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(__linux__)
         "VK_KHR_external_semaphore",
         "VK_KHR_external_semaphore_fd",
@@ -1785,7 +1786,6 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_EXT_device_memory_report",
 #endif
 #if defined(__linux__) && !defined(VK_USE_PLATFORM_ANDROID_KHR)
-        "VK_KHR_create_renderpass2",
         "VK_KHR_imageless_framebuffer",
 #endif
         // Vulkan 1.3
@@ -1808,15 +1808,6 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
             return hostRes;
         }
     }
-
-    bool hostHasWin32ExternalSemaphore =
-        getHostDeviceExtensionIndex("VK_KHR_external_semaphore_win32") != -1;
-
-    bool hostHasPosixExternalSemaphore =
-        getHostDeviceExtensionIndex("VK_KHR_external_semaphore_fd") != -1;
-
-    bool hostSupportsExternalSemaphore =
-        hostHasWin32ExternalSemaphore || hostHasPosixExternalSemaphore;
 
     std::vector<VkExtensionProperties> filteredExts;
 
@@ -1851,7 +1842,13 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
 #endif
 
 #if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(__linux__)
-    if (hostSupportsExternalSemaphore && !hostHasPosixExternalSemaphore) {
+    bool hostHasPosixExternalSemaphore =
+        getHostDeviceExtensionIndex("VK_KHR_external_semaphore_fd") != -1;
+    if (!hostHasPosixExternalSemaphore) {
+        // Always advertise posix external semaphore capabilities on Android/Linux.
+        // SYNC_FD handles will always work, regardless of host support. Support
+        // for non-sync, opaque FDs, depends on host driver support, but will
+        // be handled accordingly by host.
         filteredExts.push_back(VkExtensionProperties{"VK_KHR_external_semaphore_fd", 1});
     }
 #endif
