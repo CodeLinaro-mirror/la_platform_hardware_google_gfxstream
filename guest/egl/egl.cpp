@@ -14,10 +14,8 @@
 * limitations under the License.
 */
 
-#ifdef GFXSTREAM
 #include <atomic>
 #include <time.h>
-#endif
 
 #include <assert.h>
 
@@ -27,11 +25,7 @@
 #include "eglDisplay.h"
 #include "eglSync.h"
 #include "egl_ftable.h"
-#if PLATFORM_SDK_VERSION < 26
 #include <cutils/log.h>
-#else
-#include <log/log.h>
-#endif
 #include <cutils/properties.h>
 #include "goldfish_sync.h"
 #include "gfxstream/guest/GLClientState.h"
@@ -48,19 +42,13 @@
 
 #include <GLES3/gl31.h>
 
-#ifdef VIRTIO_GPU
 #include <xf86drm.h>
 #include <poll.h>
 #include "VirtGpu.h"
 #include "virtgpu_drm.h"
 
-#endif // VIRTIO_GPU
-
-#ifdef GFXSTREAM
 #include "aemu/base/Tracing.h"
-#endif
 #include <cutils/trace.h>
-
 
 using gfxstream::guest::GLClientState;
 using gfxstream::guest::getCurrentThreadId;
@@ -636,10 +624,6 @@ static uint64_t createNativeSync_virtioGpu(
     bool destroy_when_signaled,
     int fd_in,
     int* fd_out) {
-#ifndef VIRTIO_GPU
-    ALOGE("%s: Error: called with no virtio-gpu support built in\n", __func__);
-    return 0;
-#else
     DEFINE_HOST_CONNECTION;
 
     uint64_t sync_handle;
@@ -694,7 +678,6 @@ static uint64_t createNativeSync_virtioGpu(
     }
 
     return sync_handle;
-#endif
 }
 
 // createGoldfishOpenGLNativeSync() is for creating host-only sync objects
@@ -717,7 +700,6 @@ struct FrameTracingState {
     uint32_t frameNumber = 0;
     bool tracingEnabled = false;
     void onSwapBuffersSuccesful(ExtendedRCEncoderContext* rcEnc) {
-#ifdef GFXSTREAM
         // edge trigger
         if (gfxstream::guest::isTracingEnabled() && !tracingEnabled) {
             if (rcEnc->hasHostSideTracing()) {
@@ -730,7 +712,6 @@ struct FrameTracingState {
             }
         }
         tracingEnabled = gfxstream::guest::isTracingEnabled();
-#endif
         ++frameNumber;
     }
 };
@@ -2280,16 +2261,10 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target, EG
             case HAL_PIXEL_FORMAT_RGB_565:
             case HAL_PIXEL_FORMAT_YV12:
             case HAL_PIXEL_FORMAT_BGRA_8888:
-#if PLATFORM_SDK_VERSION >= 26
             case HAL_PIXEL_FORMAT_RGBA_FP16:
             case HAL_PIXEL_FORMAT_RGBA_1010102:
-#endif
-#if PLATFORM_SDK_VERSION >= 28
             case HAL_PIXEL_FORMAT_YCBCR_420_888:
-#endif
-#if PLATFORM_SDK_VERSION >= 30
             case HAL_PIXEL_FORMAT_YCBCR_P010:
-#endif
                 break;
             case HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED:
                 ALOGW("%s:%d using HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED\n", __func__, __LINE__);
