@@ -1512,6 +1512,16 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceTextureCompressionASTCHDRFeatures,
                       count_VkPhysicalDeviceTextureCompressionASTCHDRFeaturesEXT)
 
 #endif
+#ifdef VK_EXT_depth_clip_enable
+void count_VkPhysicalDeviceDepthClipEnableFeaturesEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceDepthClipEnableFeaturesEXT* toCount, size_t* count);
+
+void count_VkPipelineRasterizationDepthClipStateCreateInfoEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPipelineRasterizationDepthClipStateCreateInfoEXT* toCount, size_t* count);
+
+#endif
 #ifdef VK_EXT_swapchain_colorspace
 #endif
 #ifdef VK_EXT_queue_family_foreign
@@ -1536,6 +1546,24 @@ DEFINE_ALIAS_FUNCTION(count_VkDescriptorPoolInlineUniformBlockCreateInfo,
 #endif
 #ifdef VK_EXT_shader_stencil_export
 #endif
+#ifdef VK_EXT_vertex_attribute_divisor
+void count_VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT* toCount, size_t* count);
+
+void count_VkVertexInputBindingDivisorDescriptionEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkVertexInputBindingDivisorDescriptionEXT* toCount, size_t* count);
+
+void count_VkPipelineVertexInputDivisorStateCreateInfoEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPipelineVertexInputDivisorStateCreateInfoEXT* toCount, size_t* count);
+
+void count_VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT* toCount, size_t* count);
+
+#endif
 #ifdef VK_EXT_pipeline_creation_feedback
 DEFINE_ALIAS_FUNCTION(count_VkPipelineCreationFeedbackCreateInfo,
                       count_VkPipelineCreationFeedbackCreateInfoEXT)
@@ -1546,6 +1574,25 @@ DEFINE_ALIAS_FUNCTION(count_VkPipelineCreationFeedback, count_VkPipelineCreation
 #ifdef VK_NV_shader_subgroup_partitioned
 #endif
 #ifdef VK_EXT_metal_surface
+#endif
+#ifdef VK_EXT_fragment_density_map
+void count_VkPhysicalDeviceFragmentDensityMapFeaturesEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceFragmentDensityMapFeaturesEXT* toCount, size_t* count);
+
+void count_VkPhysicalDeviceFragmentDensityMapPropertiesEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkPhysicalDeviceFragmentDensityMapPropertiesEXT* toCount, size_t* count);
+
+void count_VkRenderPassFragmentDensityMapCreateInfoEXT(
+    uint32_t featureBits, VkStructureType rootType,
+    const VkRenderPassFragmentDensityMapCreateInfoEXT* toCount, size_t* count);
+
+#endif
+#ifdef VK_EXT_scalar_block_layout
+DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceScalarBlockLayoutFeatures,
+                      count_VkPhysicalDeviceScalarBlockLayoutFeaturesEXT)
+
 #endif
 #ifdef VK_EXT_subgroup_size_control
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceSubgroupSizeControlFeatures,
@@ -1775,6 +1822,8 @@ void count_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
     uint32_t featureBits, VkStructureType rootType,
     const VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT* toCount, size_t* count);
 
+#endif
+#ifdef VK_QNX_external_memory_screen_buffer
 #endif
 
 }  // namespace vk

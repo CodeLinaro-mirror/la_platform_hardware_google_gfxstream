@@ -2663,6 +2663,22 @@ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceTextureCompressionASTCH
                       transform_fromhost_VkPhysicalDeviceTextureCompressionASTCHDRFeaturesEXT)
 
 #endif
+#ifdef VK_EXT_depth_clip_enable
+void transform_tohost_VkPhysicalDeviceDepthClipEnableFeaturesEXT(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceDepthClipEnableFeaturesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceDepthClipEnableFeaturesEXT(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceDepthClipEnableFeaturesEXT* toTransform);
+
+void transform_tohost_VkPipelineRasterizationDepthClipStateCreateInfoEXT(
+    ResourceTracker* resourceTracker,
+    VkPipelineRasterizationDepthClipStateCreateInfoEXT* toTransform);
+
+void transform_fromhost_VkPipelineRasterizationDepthClipStateCreateInfoEXT(
+    ResourceTracker* resourceTracker,
+    VkPipelineRasterizationDepthClipStateCreateInfoEXT* toTransform);
+
+#endif
 #ifdef VK_EXT_swapchain_colorspace
 #endif
 #ifdef VK_EXT_queue_family_foreign
@@ -2699,6 +2715,36 @@ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkDescriptorPoolInlineUniformBlockCreat
 #endif
 #ifdef VK_EXT_shader_stencil_export
 #endif
+#ifdef VK_EXT_vertex_attribute_divisor
+void transform_tohost_VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT(
+    ResourceTracker* resourceTracker,
+    VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT(
+    ResourceTracker* resourceTracker,
+    VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT* toTransform);
+
+void transform_tohost_VkVertexInputBindingDivisorDescriptionEXT(
+    ResourceTracker* resourceTracker, VkVertexInputBindingDivisorDescriptionEXT* toTransform);
+
+void transform_fromhost_VkVertexInputBindingDivisorDescriptionEXT(
+    ResourceTracker* resourceTracker, VkVertexInputBindingDivisorDescriptionEXT* toTransform);
+
+void transform_tohost_VkPipelineVertexInputDivisorStateCreateInfoEXT(
+    ResourceTracker* resourceTracker, VkPipelineVertexInputDivisorStateCreateInfoEXT* toTransform);
+
+void transform_fromhost_VkPipelineVertexInputDivisorStateCreateInfoEXT(
+    ResourceTracker* resourceTracker, VkPipelineVertexInputDivisorStateCreateInfoEXT* toTransform);
+
+void transform_tohost_VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT(
+    ResourceTracker* resourceTracker,
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT(
+    ResourceTracker* resourceTracker,
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT* toTransform);
+
+#endif
 #ifdef VK_EXT_pipeline_creation_feedback
 DEFINE_ALIAS_FUNCTION(transform_tohost_VkPipelineCreationFeedbackCreateInfo,
                       transform_tohost_VkPipelineCreationFeedbackCreateInfoEXT)
@@ -2716,6 +2762,34 @@ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPipelineCreationFeedback,
 #ifdef VK_NV_shader_subgroup_partitioned
 #endif
 #ifdef VK_EXT_metal_surface
+#endif
+#ifdef VK_EXT_fragment_density_map
+void transform_tohost_VkPhysicalDeviceFragmentDensityMapFeaturesEXT(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceFragmentDensityMapFeaturesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceFragmentDensityMapFeaturesEXT(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceFragmentDensityMapFeaturesEXT* toTransform);
+
+void transform_tohost_VkPhysicalDeviceFragmentDensityMapPropertiesEXT(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceFragmentDensityMapPropertiesEXT* toTransform);
+
+void transform_fromhost_VkPhysicalDeviceFragmentDensityMapPropertiesEXT(
+    ResourceTracker* resourceTracker, VkPhysicalDeviceFragmentDensityMapPropertiesEXT* toTransform);
+
+void transform_tohost_VkRenderPassFragmentDensityMapCreateInfoEXT(
+    ResourceTracker* resourceTracker, VkRenderPassFragmentDensityMapCreateInfoEXT* toTransform);
+
+void transform_fromhost_VkRenderPassFragmentDensityMapCreateInfoEXT(
+    ResourceTracker* resourceTracker, VkRenderPassFragmentDensityMapCreateInfoEXT* toTransform);
+
+#endif
+#ifdef VK_EXT_scalar_block_layout
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceScalarBlockLayoutFeatures,
+                      transform_tohost_VkPhysicalDeviceScalarBlockLayoutFeaturesEXT)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceScalarBlockLayoutFeatures,
+                      transform_fromhost_VkPhysicalDeviceScalarBlockLayoutFeaturesEXT)
+
 #endif
 #ifdef VK_EXT_subgroup_size_control
 DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceSubgroupSizeControlFeatures,
@@ -3092,6 +3166,8 @@ void transform_fromhost_VkPhysicalDeviceImageCompressionControlSwapchainFeatures
     ResourceTracker* resourceTracker,
     VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT* toTransform);
 
+#endif
+#ifdef VK_QNX_external_memory_screen_buffer
 #endif
 
 }  // namespace vk
