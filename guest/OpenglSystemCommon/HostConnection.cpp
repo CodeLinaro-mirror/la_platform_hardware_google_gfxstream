@@ -89,9 +89,9 @@ using gfxstream::guest::getCurrentThreadId;
 
 #include "VirtGpu.h"
 #include "VirtioGpuPipeStream.h"
-#include "virtgpu_drm.h"
 
 #if defined(__linux__) || defined(__ANDROID__)
+#include "virtgpu_drm.h"
 #include <fstream>
 #include <string>
 #include <unistd.h>
@@ -368,10 +368,12 @@ std::unique_ptr<HostConnection> HostConnection::connect(enum VirtGpuCapset capse
 
     auto fd = (connType == HOST_CONNECTION_VIRTIO_GPU_ADDRESS_SPACE) ? con->m_rendernodeFd : -1;
     processPipeInit(fd, connType, noRenderControlEnc);
+    if (!noRenderControlEnc) {
+        con->rcEncoder();
+    }
+
     return con;
 }
-
-bool HostConnection::isInit() { return (getEGLThreadInfo()->hostConn != NULL); }
 
 HostConnection* HostConnection::get() { return getWithThreadInfo(getEGLThreadInfo(), kCapsetNone); }
 
@@ -458,7 +460,6 @@ ExtendedRCEncoderContext *HostConnection::rcEncoder()
         ExtendedRCEncoderContext* rcEnc = m_rcEnc.get();
         setChecksumHelper(rcEnc);
         queryAndSetSyncImpl(rcEnc);
-        queryAndSetDmaImpl(rcEnc);
         queryAndSetGLESMaxVersion(rcEnc);
         queryAndSetNoErrorState(rcEnc);
         queryAndSetHostCompositionImpl(rcEnc);
@@ -582,15 +583,6 @@ void HostConnection::queryAndSetSyncImpl(ExtendedRCEncoderContext *rcEnc) {
         rcEnc->setSyncImpl(SYNC_IMPL_NATIVE_SYNC_V2);
     } else {
         rcEnc->setSyncImpl(SYNC_IMPL_NONE);
-    }
-}
-
-void HostConnection::queryAndSetDmaImpl(ExtendedRCEncoderContext *rcEnc) {
-    std::string hostExtensions = queryHostExtensions(rcEnc);
-    if (hostExtensions.find(kDmaExtStr_v1) != std::string::npos) {
-        rcEnc->setDmaImpl(DMA_IMPL_v1);
-    } else {
-        rcEnc->setDmaImpl(DMA_IMPL_NONE);
     }
 }
 
