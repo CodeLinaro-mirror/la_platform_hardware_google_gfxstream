@@ -34,13 +34,6 @@
 #define PARAM(x) \
     (struct VirtGpuParam) { x, #x, 0 }
 
-#if defined(PAGE_SIZE) && defined(VIRTIO_GPU)
-constexpr size_t kPageSize = PAGE_SIZE;
-#else
-#include <unistd.h>
-static const size_t kPageSize = getpagesize();
-#endif
-
 static inline uint32_t align_up(uint32_t n, uint32_t a) { return ((n + a - 1) / a) * a; }
 
 LinuxVirtGpuDevice::LinuxVirtGpuDevice(enum VirtGpuCapset capset, int fd) : VirtGpuDevice(capset) {
@@ -85,7 +78,7 @@ LinuxVirtGpuDevice::LinuxVirtGpuDevice(enum VirtGpuCapset capset, int fd) : Virt
 
         ret = drmIoctl(mDeviceHandle, DRM_IOCTL_VIRTGPU_GETPARAM, &get_param);
         if (ret) {
-            ALOGE("virtgpu backend not enabling %s", params[i].name);
+            ALOGV("virtgpu backend not enabling %s", params[i].name);
             continue;
         }
 

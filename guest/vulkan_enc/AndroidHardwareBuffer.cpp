@@ -14,16 +14,15 @@
 // limitations under the License.
 #include "AndroidHardwareBuffer.h"
 
-#if !defined(HOST_BUILD)
 #if defined(__ANDROID__) || defined(__linux__)
 #include <drm_fourcc.h>
 #define DRM_FORMAT_YVU420_ANDROID fourcc_code('9', '9', '9', '7')
 #endif
-#endif
 
 #include <assert.h>
+#include <log/log.h>
 
-#include "../OpenglSystemCommon/HostConnection.h"
+#include "gfxstream/guest/Gralloc.h"
 #include "vk_format_info.h"
 #include "vk_util.h"
 
@@ -67,6 +66,9 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
     const auto format = grallocHelper->getFormat(buffer);
     if (ahbFormatProps) {
         switch (format) {
+            case AHARDWAREBUFFER_FORMAT_R8_UNORM:
+                ahbFormatProps->format = VK_FORMAT_R8_UNORM;
+                break;
             case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
                 ahbFormatProps->format = VK_FORMAT_R8G8B8A8_UNORM;
                 break;
@@ -135,7 +137,6 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
         ahbFormatProps->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_IDENTITY;
         ahbFormatProps->samplerYcbcrConversionComponents.a = VK_COMPONENT_SWIZZLE_IDENTITY;
 
-#if !defined(HOST_BUILD)
 #if defined(__ANDROID__) || defined(__linux__)
         if (android_format_is_yuv(format)) {
             uint32_t drmFormat = grallocHelper->getFormatDrmFourcc(buffer);
@@ -193,8 +194,6 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
             }
         }
 #endif
-#endif
-
         ahbFormatProps->suggestedYcbcrModel = android_format_is_yuv(format)
                                                   ? VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601
                                                   : VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;

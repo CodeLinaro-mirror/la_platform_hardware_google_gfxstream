@@ -17,10 +17,6 @@ subdir('mesa')
 #===============#
 gfxstream_guest_args = []
 
-# Paravirtualization moving towards virtio
-gfxstream_guest_args += '-DVIRTIO_GPU'
-# Gfxstream
-gfxstream_guest_args += '-DGFXSTREAM'
 # Our internal guest build
 gfxstream_guest_args += '-DLINUX_GUEST_BUILD'
 # Don't want to goldfish OpenGL
@@ -37,6 +33,10 @@ gfxstream_guest_args += '-DVK_GFXSTREAM_STRUCTURE_TYPE_EXT'
 dl_dep = cc.find_library('dl', required: false)
 drm_dep = dependency('libdrm')
 thread_dep = dependency('threads')
+
+if with_guest_test
+  gfxstream_backend_dep = dependency('gfxstream_backend')
+endif
 
 #===============#
 # Includes      #

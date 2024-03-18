@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "GfxstreamEnd2EndTests.h"
+#include <log/log.h>
 
+#include "GfxstreamEnd2EndTests.h"
 #include "drm_fourcc.h"
 
 namespace gfxstream {
@@ -27,22 +28,6 @@ using testing::IsEmpty;
 using testing::IsNull;
 using testing::Not;
 using testing::NotNull;
-
-uint32_t GetMemoryType(const vkhpp::PhysicalDevice& physicalDevice,
-                       const vkhpp::MemoryRequirements& memoryRequirements,
-                       vkhpp::MemoryPropertyFlags memoryProperties) {
-  const auto props = physicalDevice.getMemoryProperties();
-  for (uint32_t i = 0; i < props.memoryTypeCount; i++) {
-    if (!(memoryRequirements.memoryTypeBits & (1 << i))) {
-      continue;
-    }
-    if ((props.memoryTypes[i].propertyFlags & memoryProperties) != memoryProperties) {
-      continue;
-    }
-    return i;
-  }
-  return -1;
-}
 
 template <typename DurationType>
 constexpr uint64_t AsVkTimeout(DurationType duration) {
@@ -62,11 +47,12 @@ TEST_P(GfxstreamEnd2EndVkTest, ImportAHB) {
 
     const uint32_t width = 32;
     const uint32_t height = 32;
-    auto ahb = mGralloc->allocate(width, height, DRM_FORMAT_ABGR8888);
+    AHardwareBuffer* ahb = nullptr;
+    ASSERT_THAT(mGralloc->allocate(width, height, DRM_FORMAT_ABGR8888, -1, &ahb), Eq(0));
 
     const VkNativeBufferANDROID imageNativeBufferInfo = {
         .sType = VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID,
-        .handle = ahb->asBufferHandle(),
+        .handle = mGralloc->getNativeHandle(ahb),
     };
 
     auto vkQueueSignalReleaseImageANDROID = PFN_vkQueueSignalReleaseImageANDROID(
@@ -179,6 +165,8 @@ TEST_P(GfxstreamEnd2EndVkTest, ImportAHB) {
     ASSERT_THAT(fence, Not(Eq(-1)));
 
     ASSERT_THAT(mSync->wait(fence, 3000), Eq(0));
+
+    mGralloc->release(ahb);
 }
 
 TEST_P(GfxstreamEnd2EndVkTest, DeferredImportAHB) {
@@ -187,7 +175,8 @@ TEST_P(GfxstreamEnd2EndVkTest, DeferredImportAHB) {
 
     const uint32_t width = 32;
     const uint32_t height = 32;
-    auto ahb = mGralloc->allocate(width, height, DRM_FORMAT_ABGR8888);
+    AHardwareBuffer* ahb = nullptr;
+    ASSERT_THAT(mGralloc->allocate(width, height, DRM_FORMAT_ABGR8888, -1, &ahb), Eq(0));
 
     auto vkQueueSignalReleaseImageANDROID = PFN_vkQueueSignalReleaseImageANDROID(
         device->getProcAddr("vkQueueSignalReleaseImageANDROID"));
@@ -215,7 +204,7 @@ TEST_P(GfxstreamEnd2EndVkTest, DeferredImportAHB) {
     // NOTE: Binding the VkImage to the AHB happens after the VkImage is created.
     const VkNativeBufferANDROID imageNativeBufferInfo = {
         .sType = VK_STRUCTURE_TYPE_NATIVE_BUFFER_ANDROID,
-        .handle = ahb->asBufferHandle(),
+        .handle = mGralloc->getNativeHandle(ahb),
     };
 
     const vkhpp::BindImageMemoryInfo imageBindMemoryInfo = {
@@ -234,6 +223,8 @@ TEST_P(GfxstreamEnd2EndVkTest, DeferredImportAHB) {
     ASSERT_THAT(fence, Not(Eq(-1)));
 
     ASSERT_THAT(mSync->wait(fence, 3000), Eq(0));
+
+    mGralloc->release(ahb);
 }
 
 TEST_P(GfxstreamEnd2EndVkTest, HostMemory) {

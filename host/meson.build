@@ -23,6 +23,9 @@ if host_machine.system() == 'qnx'
   endif
 endif
 
+pkg_cflags = []
+pkg_cflags += '-DGFXSTREAM_UNSTABLE=1'
+
 #===============#
 # Dependencies  #
 #===============#
@@ -104,7 +107,7 @@ endif
 
 if use_magma
   gfxstream_host_args += '-DGFXSTREAM_ENABLE_HOST_GLES=1'
-  drm_dep = dependency('libdrm')
+  drm_dep = dependency('libdrm', fallback: ['libdrm', 'libdrm_dep'])
 else
   gfxstream_host_args += '-DGFXSTREAM_ENABLE_HOST_GLES=0'
 endif
@@ -118,15 +121,12 @@ gfxstream_headers = files(
   'include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h')
 
 inc_root = include_directories('../')
-inc_include = include_directories('../include')
+inc_gfxstream_include = include_directories('../include')
+inc_include = include_directories('../guest/mesa/include')
 inc_utils = include_directories('../utils/include')
 
 if use_vulkan
-  if cc.has_header('vulkan/vulkan.h')
-    inc_vulkan_headers = include_directories()
-  else
-    inc_vulkan_headers = include_directories('../common/vulkan/include')
-  endif
+  inc_vulkan_headers = include_directories('../common/vulkan/include')
 
   if cc.has_header('renderdoc_app.h')
     inc_renderdoc_external = include_directories()
@@ -152,7 +152,7 @@ inc_host_include = include_directories('include')
 subdir('apigen-codec-common')
 subdir('gl/gl-host-common')
 
-inc_gfxstream_backend = [inc_root, inc_include, inc_apigen_codec, inc_utils,
+inc_gfxstream_backend = [inc_root, inc_gfxstream_include, inc_include, inc_apigen_codec, inc_utils,
                          inc_gl_host_common, inc_host_include]
 
 link_gfxstream_backend = [lib_gl_host_common, lib_apigen_codec]
@@ -283,5 +283,6 @@ install_headers(gfxstream_headers,
 pkg = import('pkgconfig')
 pkg.generate(gfxstream_backend,
              description: 'gfxstream backend',
+             extra_cflags: pkg_cflags,
              subdirs: 'gfxstream'
 )
