@@ -31,6 +31,7 @@
 #include "aemu/base/ManagedDescriptor.hpp"
 #include "aemu/base/Optional.h"
 #include "aemu/base/synchronization/Lock.h"
+#include "gfxstream/host/Features.h"
 #include "goldfish_vk_private_defs.h"
 #include "utils/GfxApiLogger.h"
 #include "utils/RenderDoc.h"
@@ -88,6 +89,8 @@ enum class AstcEmulationMode {
 struct VkEmulation {
     // Whether initialization succeeded.
     bool live = false;
+
+    gfxstream::host::FeatureSet features;
 
     // Whether to use deferred command submission.
     bool useDeferredCommands = false;
@@ -312,6 +315,7 @@ struct VkEmulation {
         uint32_t currentQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
 
         bool glExported = false;
+        bool externalMemoryCompatible = false;
 
         VulkanMode vulkanMode = VulkanMode::Default;
 
@@ -400,7 +404,7 @@ struct VkEmulation {
     std::optional<uint32_t> representativeColorBufferMemoryTypeIndex;
 };
 
-VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk, bool useVulkanNativeSwapchain);
+VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk, gfxstream::host::FeatureSet features);
 
 struct VkEmulationFeatures {
     bool glInteropSupported = false;
@@ -438,7 +442,8 @@ bool importExternalMemoryDedicatedImage(VulkanDispatch* vk, VkDevice targetDevic
 
 // ColorBuffer operations
 
-bool isColorBufferExportedToGl(uint32_t colorBufferHandle, bool* exported);
+bool getColorBufferShareInfo(uint32_t colorBufferHandle, bool* glExported,
+                             bool* externalMemoryCompatible);
 
 bool getColorBufferAllocationInfo(uint32_t colorBufferHandle, VkDeviceSize* outSize,
                                   uint32_t* outMemoryTypeIndex, bool* outMemoryIsDedicatedAlloc,
