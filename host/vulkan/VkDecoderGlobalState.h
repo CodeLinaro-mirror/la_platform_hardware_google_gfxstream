@@ -28,6 +28,7 @@
 #include "aemu/base/AsyncResult.h"
 #include "aemu/base/HealthMonitor.h"
 #include "aemu/base/synchronization/Lock.h"
+#include "gfxstream/host/Features.h"
 #include "goldfish_vk_private_defs.h"
 #include "cereal/common/goldfish_vk_transform.h"
 #include "host-common/GfxstreamFatalError.h"
@@ -75,6 +76,8 @@ class VkDecoderGlobalState {
 
     // Snapshot save/load
     bool snapshotsEnabled() const;
+
+    const gfxstream::host::FeatureSet& getFeatures() const;
 
     // Whether to clean up VK instance.
     // bug 149997534
@@ -599,6 +602,16 @@ class VkDecoderGlobalState {
                                        VkRenderPass* pRenderPass);
     void on_vkDestroyRenderPass(android::base::BumpPool* pool, VkDevice device,
                                 VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator);
+    void on_vkCmdBeginRenderPass(android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
+                                 const VkRenderPassBeginInfo* pRenderPassBegin,
+                                 VkSubpassContents contents);
+    void on_vkCmdBeginRenderPass2(android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
+                                  const VkRenderPassBeginInfo* pRenderPassBegin,
+                                  const VkSubpassBeginInfo* pSubpassBeginInfo);
+    void on_vkCmdBeginRenderPass2KHR(android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
+                                     const VkRenderPassBeginInfo* pRenderPassBegin,
+                                     const VkSubpassBeginInfo* pSubpassBeginInfo);
+
     VkResult on_vkCreateFramebuffer(android::base::BumpPool* pool, VkDevice device,
                                     const VkFramebufferCreateInfo* pCreateInfo,
                                     const VkAllocationCallbacks* pAllocator,

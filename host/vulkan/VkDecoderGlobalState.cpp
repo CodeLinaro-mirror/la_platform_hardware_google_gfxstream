@@ -52,7 +52,6 @@
 #include "host-common/HostmemIdMapping.h"
 #include "host-common/address_space_device_control_ops.h"
 #include "host-common/emugl_vm_operations.h"
-#include "host-common/feature_control.h"
 #include "host-common/vm_operations.h"
 #include "utils/RenderDoc.h"
 #include "vk_util.h"
@@ -245,6 +244,17 @@ class BoxedHandleManager {
         return res;
     }
 
+    void update(uint64_t handle, const T& item, BoxedHandleTypeTag tag) {
+        auto storedItem = store.get(handle);
+        uint64_t oldHandle = (uint64_t)storedItem->underlying;
+        *storedItem = item;
+        AutoLock l(lock);
+        if (oldHandle) {
+            reverseMap.erase(oldHandle);
+        }
+        reverseMap[(uint64_t)(item.underlying)] = handle;
+    }
+
     void remove(uint64_t h) {
         auto item = get(h);
         if (item) {
@@ -325,10 +335,10 @@ struct ReadStreamRegistry {
 
     ReadStreamRegistry() { freeStreams.reserve(100); };
 
-    VulkanMemReadingStream* pop() {
+    VulkanMemReadingStream* pop(const gfxstream::host::FeatureSet& features) {
         AutoLock lock(mLock);
         if (freeStreams.empty()) {
-            return new VulkanMemReadingStream(0);
+            return new VulkanMemReadingStream(nullptr, features);
         } else {
             VulkanMemReadingStream* res = freeStreams.back();
             freeStreams.pop_back();
@@ -350,7 +360,7 @@ class VkDecoderGlobalState::Impl {
         : m_vk(vkDispatch()),
           m_emu(getGlobalVkEmulation()),
           mRenderDocWithMultipleVkInstances(m_emu->guestRenderDoc.get()) {
-        mSnapshotsEnabled = feature_is_enabled(kFeature_VulkanSnapshots);
+        mSnapshotsEnabled = m_emu->features.VulkanSnapshots.enabled;
         mVkCleanupEnabled =
             android::base::getEnvironmentVariable("ANDROID_EMU_VK_NO_CLEANUP") != "1";
         mLogging = android::base::getEnvironmentVariable("ANDROID_EMU_VK_LOG_CALLS") == "1";
@@ -361,7 +371,7 @@ class VkDecoderGlobalState::Impl {
                                                 .control_get_hw_funcs()
                                                 ->getPhysAddrStartLocked();
         }
-        mGuestUsesAngle = feature_is_enabled(kFeature_GuestUsesAngle);
+        mGuestUsesAngle = m_emu->features.GuestUsesAngle.enabled;
     }
 
     ~Impl() = default;
@@ -405,6 +415,8 @@ class VkDecoderGlobalState::Impl {
     bool snapshotsEnabled() const { return mSnapshotsEnabled; }
 
     bool vkCleanupEnabled() const { return mVkCleanupEnabled; }
+
+    const gfxstream::host::FeatureSet& getFeatures() const { return m_emu->features; }
 
     void save(android::base::Stream* stream) {
         mSnapshotState = SnapshotState::Saving;
@@ -685,8 +697,7 @@ class VkDecoderGlobalState::Impl {
         }
 
         // TODO: bug 129484301
-        get_emugl_vm_operations().setSkipSnapshotSave(
-            !feature_is_enabled(kFeature_VulkanSnapshots));
+        get_emugl_vm_operations().setSkipSnapshotSave(!m_emu->features.VulkanSnapshots.enabled);
 
         InstanceInfo info;
         info.apiVersion = apiVersion;
@@ -954,6 +965,13 @@ class VkDecoderGlobalState::Impl {
         if (ycbcrFeatures != nullptr) {
             ycbcrFeatures->samplerYcbcrConversion |= m_emu->enableYcbcrEmulation;
         }
+        VkPhysicalDeviceProtectedMemoryFeatures* protectedMemoryFeatures =
+            vk_find_struct<VkPhysicalDeviceProtectedMemoryFeatures>(pFeatures);
+        if (protectedMemoryFeatures != nullptr) {
+            // Protected memory is not supported on emulators. Override feature
+            // information to mark as unsupported (see b/329845987).
+            protectedMemoryFeatures->protectedMemory = VK_FALSE;
+        }
     }
 
     VkResult on_vkGetPhysicalDeviceImageFormatProperties(
@@ -1217,15 +1235,15 @@ class VkDecoderGlobalState::Impl {
                 heap.size = kMaxSafeHeapSize;
             }
 
-            if (!feature_is_enabled(kFeature_GLDirectMem) &&
-                !feature_is_enabled(kFeature_VirtioGpuNext)) {
+            if (!m_emu->features.GlDirectMem.enabled &&
+                !m_emu->features.VirtioGpuNext.enabled) {
                 pMemoryProperties->memoryTypes[i].propertyFlags =
                     pMemoryProperties->memoryTypes[i].propertyFlags &
                     ~(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
             }
 
             // for AMD, zap the type that is is not on device
-            if (feature_is_enabled(kFeature_VulkanAllocateDeviceMemoryOnly)) {
+            if (m_emu->features.VulkanAllocateDeviceMemoryOnly.enabled) {
                 auto memFlags = pMemoryProperties->memoryTypes[i].propertyFlags;
                 if (!(memFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
                     pMemoryProperties->memoryTypes[i].propertyFlags = 0;
@@ -1283,15 +1301,15 @@ class VkDecoderGlobalState::Impl {
                 heap.size = kMaxSafeHeapSize;
             }
 
-            if (!feature_is_enabled(kFeature_GLDirectMem) &&
-                !feature_is_enabled(kFeature_VirtioGpuNext)) {
+            if (!m_emu->features.GlDirectMem.enabled &&
+                !m_emu->features.VirtioGpuNext.enabled) {
                 pMemoryProperties->memoryProperties.memoryTypes[i].propertyFlags =
                     pMemoryProperties->memoryProperties.memoryTypes[i].propertyFlags &
                     ~(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
             }
 
             // for AMD, zap the type that is is not on device
-            if (feature_is_enabled(kFeature_VulkanAllocateDeviceMemoryOnly)) {
+            if (m_emu->features.VulkanAllocateDeviceMemoryOnly.enabled) {
                 auto memFlags = pMemoryProperties->memoryProperties.memoryTypes[i].propertyFlags;
                 if (!(memFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
                     pMemoryProperties->memoryProperties.memoryTypes[i].propertyFlags = 0;
@@ -1575,7 +1593,7 @@ class VkDecoderGlobalState::Impl {
                               const VkDeviceQueueInfo2* pQueueInfo, VkQueue* pQueue) {
         // Protected memory is not supported on emulators. So we should
         // not return any queue if a client requests a protected device
-        // queue.
+        // queue. See b/328436383.
         if (pQueueInfo->flags & VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT) {
             *pQueue = VK_NULL_HANDLE;
             fprintf(stderr, "%s: Cannot get protected Vulkan device queue\n", __func__);
@@ -2286,7 +2304,6 @@ class VkDecoderGlobalState::Impl {
             {
                 std::lock_guard<std::recursive_mutex> lock(mLock);
                 auto boxed_fence = unboxed_to_boxed_non_dispatchable_VkFence(fence);
-                delete_VkFence(boxed_fence);
                 set_boxed_non_dispatchable_VkFence(boxed_fence, replacement);
 
                 auto& fenceInfo = mFenceInfo[replacement];
@@ -2497,7 +2514,7 @@ class VkDecoderGlobalState::Impl {
                 info.pools.push_back(state);
             }
 
-            if (feature_is_enabled(kFeature_VulkanBatchedDescriptorSetUpdate)) {
+            if (m_emu->features.VulkanBatchedDescriptorSetUpdate.enabled) {
                 for (uint32_t i = 0; i < pCreateInfo->maxSets; ++i) {
                     info.poolIds.push_back(
                         (uint64_t)new_boxed_non_dispatchable_VkDescriptorSet(VK_NULL_HANDLE));
@@ -2517,12 +2534,12 @@ class VkDecoderGlobalState::Impl {
             auto unboxedSet = it.first;
             auto boxedSet = it.second;
             mDescriptorSetInfo.erase(unboxedSet);
-            if (!feature_is_enabled(kFeature_VulkanBatchedDescriptorSetUpdate)) {
+            if (!m_emu->features.VulkanBatchedDescriptorSetUpdate.enabled) {
                 delete_VkDescriptorSet(boxedSet);
             }
         }
 
-        if (feature_is_enabled(kFeature_VulkanBatchedDescriptorSetUpdate)) {
+        if (m_emu->features.VulkanBatchedDescriptorSetUpdate.enabled) {
             if (isDestroy) {
                 for (auto poolId : info->poolIds) {
                     delete_VkDescriptorSet((VkDescriptorSet)poolId);
@@ -2650,7 +2667,7 @@ class VkDecoderGlobalState::Impl {
 
                 auto handleInfo = sBoxedHandleManager.get((uint64_t)*descSetAllocedEntry);
                 if (handleInfo) {
-                    if (feature_is_enabled(kFeature_VulkanBatchedDescriptorSetUpdate)) {
+                    if (m_emu->features.VulkanBatchedDescriptorSetUpdate.enabled) {
                         handleInfo->underlying = reinterpret_cast<uint64_t>(VK_NULL_HANDLE);
                     } else {
                         delete_VkDescriptorSet(*descSetAllocedEntry);
@@ -2701,6 +2718,7 @@ class VkDecoderGlobalState::Impl {
                 }
                 if (imgViewInfo->boundColorBuffer) {
                     // TODO(igorc): Move this to vkQueueSubmit time.
+                    // Likely can be removed after b/323596143
                     auto fb = FrameBuffer::getFB();
                     if (fb) {
                         fb->invalidateColorBufferForVk(*imgViewInfo->boundColorBuffer);
@@ -3444,6 +3462,22 @@ class VkDecoderGlobalState::Impl {
         if (!deviceInfo) return;
 
         // TODO: update image layout in ImageInfo
+        for (uint32_t i = 0; i < imageMemoryBarrierCount; i++) {
+            const VkImageMemoryBarrier& barrier = pImageMemoryBarriers[i];
+            auto* imageInfo = android::base::find(mImageInfo, barrier.image);
+            if (!imageInfo || !imageInfo->boundColorBuffer.has_value()) {
+                continue;
+            }
+            HandleType cb = imageInfo->boundColorBuffer.value();
+            if (barrier.srcQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL) {
+                cmdBufferInfo->acquiredColorBuffers.insert(cb);
+            }
+            if (barrier.dstQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL) {
+                cmdBufferInfo->releasedColorBuffers.insert(cb);
+            }
+            cmdBufferInfo->cbLayouts[cb] = barrier.newLayout;
+        }
+
         if (!deviceInfo->emulateTextureEtc2 && !deviceInfo->emulateTextureAstc) {
             vk->vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, dependencyFlags,
                                      memoryBarrierCount, pMemoryBarriers, bufferMemoryBarrierCount,
@@ -3499,10 +3533,10 @@ class VkDecoderGlobalState::Impl {
     bool mapHostVisibleMemoryToGuestPhysicalAddressLocked(VulkanDispatch* vk, VkDevice device,
                                                           VkDeviceMemory memory,
                                                           uint64_t physAddr) {
-        if (!feature_is_enabled(kFeature_GLDirectMem) &&
-            !feature_is_enabled(kFeature_VirtioGpuNext)) {
+        if (!m_emu->features.GlDirectMem.enabled &&
+            !m_emu->features.VirtioGpuNext.enabled) {
             // fprintf(stderr, "%s: Tried to use direct mapping "
-            // "while GLDirectMem is not enabled!\n");
+            // "while GlDirectMem is not enabled!\n");
         }
 
         auto* info = android::base::find(mMemoryInfo, memory);
@@ -3830,7 +3864,7 @@ class VkDecoderGlobalState::Impl {
 #endif
 
         bool hostVisible = memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-        if (hostVisible && feature_is_enabled(kFeature_ExternalBlob)) {
+        if (hostVisible && m_emu->features.ExternalBlob.enabled) {
             vk_append_struct(&structChainIter, &exportAllocate);
         }
 
@@ -3868,9 +3902,10 @@ class VkDecoderGlobalState::Impl {
 
         VkImportMemoryHostPointerInfoEXT importHostInfo;
         std::optional<SharedMemory> sharedMemory = std::nullopt;
+        std::shared_ptr<PrivateMemory> privateMemory = {};
 
         // TODO(b/261222354): Make sure the feature exists when initializing sVkEmulation.
-        if (hostVisible && feature_is_enabled(kFeature_SystemBlob)) {
+        if (hostVisible && m_emu->features.SystemBlob.enabled) {
             // Ensure size is page-aligned.
             VkDeviceSize alignedSize = __ALIGN(localAllocInfo.allocationSize, kPageSizeforBlob);
             if (alignedSize != localAllocInfo.allocationSize) {
@@ -3899,7 +3934,23 @@ class VkDecoderGlobalState::Impl {
                               .pNext = NULL,
                               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                               .pHostPointer = mappedPtr};
-            localAllocInfo.pNext = &importHostInfo;
+            vk_append_struct(&structChainIter, &importHostInfo);
+        }
+
+        VkImportMemoryHostPointerInfoEXT importHostInfoPrivate{};
+        if (hostVisible && m_emu->features.VulkanAllocateHostMemory.enabled &&
+            localAllocInfo.pNext == nullptr) {
+            VkDeviceSize alignedSize = __ALIGN(localAllocInfo.allocationSize, kPageSizeforBlob);
+            localAllocInfo.allocationSize = alignedSize;
+            privateMemory =
+                std::make_shared<PrivateMemory>(kPageSizeforBlob, localAllocInfo.allocationSize);
+            mappedPtr = privateMemory->getAddr();
+            importHostInfoPrivate = {
+                .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+                .pNext = NULL,
+                .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                .pHostPointer = mappedPtr};
+            vk_append_struct(&structChainIter, &importHostInfoPrivate);
         }
 
         VkResult result = vk->vkAllocateMemory(device, &localAllocInfo, pAllocator, pMemory);
@@ -3966,7 +4017,7 @@ class VkDecoderGlobalState::Impl {
         // When external blobs are on, we want to map memory only if a workaround is using it in
         // the gfxstream process. This happens when ASTC CPU emulation is on.
         bool needToMap =
-            (!feature_is_enabled(kFeature_ExternalBlob) ||
+            (!m_emu->features.ExternalBlob.enabled ||
              (deviceInfo->useAstcCpuDecompression && deviceInfo->emulateTextureAstc)) &&
             !createBlobInfoPtr;
 
@@ -3992,6 +4043,8 @@ class VkDecoderGlobalState::Impl {
             // Always assign the shared memory into memoryInfo. If it was used, then it will have
             // ownership transferred.
             memoryInfo.sharedMemory = std::exchange(sharedMemory, std::nullopt);
+
+            memoryInfo.privateMemory = privateMemory;
         }
 
         *pMemory = new_boxed_non_dispatchable_VkDeviceMemory(*pMemory);
@@ -4095,8 +4148,8 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool usingDirectMapping() const {
-        return feature_is_enabled(kFeature_GLDirectMem) ||
-               feature_is_enabled(kFeature_VirtioGpuNext);
+        return m_emu->features.GlDirectMem.enabled ||
+               m_emu->features.VirtioGpuNext.enabled;
     }
 
     HostFeatureSupport getHostFeatureSupport() const {
@@ -4257,10 +4310,10 @@ class VkDecoderGlobalState::Impl {
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
 
-        if (!feature_is_enabled(kFeature_GLDirectMem)) {
+        if (!m_emu->features.GlDirectMem.enabled) {
             fprintf(stderr,
                     "FATAL: Tried to use direct mapping "
-                    "while GLDirectMem is not enabled!\n");
+                    "while GlDirectMem is not enabled!\n");
         }
 
         std::lock_guard<std::recursive_mutex> lock(mLock);
@@ -4294,7 +4347,7 @@ class VkDecoderGlobalState::Impl {
 
         hostBlobId = (info->blobId && !hostBlobId) ? info->blobId : hostBlobId;
 
-        if (feature_is_enabled(kFeature_SystemBlob) && info->sharedMemory.has_value()) {
+        if (m_emu->features.SystemBlob.enabled && info->sharedMemory.has_value()) {
             uint32_t handleType = STREAM_MEM_HANDLE_TYPE_SHM;
             // We transfer ownership of the shared memory handle to the descriptor info.
             // The memory itself is destroyed only when all processes unmap / release their
@@ -4302,7 +4355,7 @@ class VkDecoderGlobalState::Impl {
             BlobManager::get()->addDescriptorInfo(ctx_id, hostBlobId,
                                                   info->sharedMemory->releaseHandle(), handleType,
                                                   info->caching, std::nullopt);
-        } else if (feature_is_enabled(kFeature_ExternalBlob)) {
+        } else if (m_emu->features.ExternalBlob.enabled) {
             VkResult result;
             auto device = unbox_VkDevice(boxed_device);
             DescriptorType handle;
@@ -4519,6 +4572,22 @@ class VkDecoderGlobalState::Impl {
         return vk->vkQueueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
     }
 
+    int getCommandBufferCount(const VkSubmitInfo& submitInfo) {
+        return submitInfo.commandBufferCount;
+    }
+
+    VkCommandBuffer getCommandBuffer(const VkSubmitInfo& submitInfo, int idx) {
+        return submitInfo.pCommandBuffers[idx];
+    }
+
+    int getCommandBufferCount(const VkSubmitInfo2& submitInfo) {
+        return submitInfo.commandBufferInfoCount;
+    }
+
+    VkCommandBuffer getCommandBuffer(const VkSubmitInfo2& submitInfo, int idx) {
+        return submitInfo.pCommandBufferInfos[idx].commandBuffer;
+    }
+
     template <typename VkSubmitInfoType>
     VkResult on_vkQueueSubmit(android::base::BumpPool* pool, VkQueue boxed_queue,
                               uint32_t submitCount, const VkSubmitInfoType* pSubmits,
@@ -4526,6 +4595,37 @@ class VkDecoderGlobalState::Impl {
         auto queue = unbox_VkQueue(boxed_queue);
         auto vk = dispatch_VkQueue(boxed_queue);
 
+        std::unordered_set<HandleType> acquiredColorBuffers;
+        std::unordered_set<HandleType> releasedColorBuffers;
+        bool vulkanOnly = mGuestUsesAngle;
+        if (!vulkanOnly) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(mLock);
+                for (int i = 0; i < submitCount; i++) {
+                    for (int j = 0; j < getCommandBufferCount(pSubmits[i]); j++) {
+                        VkCommandBuffer cmdBuffer = getCommandBuffer(pSubmits[i], j);
+                        CommandBufferInfo* cmdBufferInfo =
+                            android::base::find(mCmdBufferInfo, cmdBuffer);
+                        if (!cmdBufferInfo) {
+                            continue;
+                        }
+                        acquiredColorBuffers.merge(cmdBufferInfo->acquiredColorBuffers);
+                        releasedColorBuffers.merge(cmdBufferInfo->releasedColorBuffers);
+                        for (const auto& ite : cmdBufferInfo->cbLayouts) {
+                            setColorBufferCurrentLayout(ite.first, ite.second);
+                        }
+                    }
+                }
+            }
+            auto fb = FrameBuffer::getFB();
+            if (fb) {
+                for (HandleType cb : acquiredColorBuffers) {
+                    fb->invalidateColorBufferForVk(cb);
+                }
+            }
+        }
+
+        VkDevice device = VK_NULL_HANDLE;
         Lock* ql;
         {
             std::lock_guard<std::recursive_mutex> lock(mLock);
@@ -4533,7 +4633,8 @@ class VkDecoderGlobalState::Impl {
             {
                 auto* queueInfo = android::base::find(mQueueInfo, queue);
                 if (queueInfo) {
-                    sBoxedHandleManager.processDelayedRemovesGlobalStateLocked(queueInfo->device);
+                    device = queueInfo->device;
+                    sBoxedHandleManager.processDelayedRemovesGlobalStateLocked(device);
                 }
             }
 
@@ -4546,8 +4647,18 @@ class VkDecoderGlobalState::Impl {
             ql = queueInfo->lock;
         }
 
+        VkFence localFence = VK_NULL_HANDLE;
+        if (!releasedColorBuffers.empty() && fence == VK_NULL_HANDLE) {
+            // Need to manually inject a fence so that we could update color buffer
+            // after queue submits..
+            // This should almost never happen.
+            VkFenceCreateInfo fenceCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            };
+            vk->vkCreateFence(device, &fenceCreateInfo, nullptr, &localFence);
+        }
         AutoLock qlock(*ql);
-        auto result = dispatchVkQueueSubmit(vk, queue, submitCount, pSubmits, fence);
+        auto result = dispatchVkQueueSubmit(vk, queue, submitCount, pSubmits, localFence ?: fence);
 
         // After vkQueueSubmit is called, we can signal the conditional variable
         // in FenceInfo, so that other threads (e.g. SyncThread) can call
@@ -4560,6 +4671,19 @@ class VkDecoderGlobalState::Impl {
                 fenceInfo->lock.lock();
                 fenceInfo->cv.signalAndUnlock(&fenceInfo->lock);
             }
+        }
+        if (!releasedColorBuffers.empty()) {
+            vk->vkWaitForFences(device, 1, localFence ? &localFence : &fence, VK_TRUE,
+                                /* 1 sec */ 1000000000L);
+            auto fb = FrameBuffer::getFB();
+            if (fb) {
+                for (HandleType cb : releasedColorBuffers) {
+                    fb->flushColorBufferFromVk(cb);
+                }
+            }
+        }
+        if (localFence) {
+            vk->vkDestroyFence(device, localFence, nullptr);
         }
 
         return result;
@@ -5088,6 +5212,41 @@ class VkDecoderGlobalState::Impl {
         destroyRenderPassLocked(device, deviceDispatch, renderPass, pAllocator);
     }
 
+    void registerRenderPassBeginInfo(VkCommandBuffer commandBuffer,
+                                     const VkRenderPassBeginInfo* pRenderPassBegin) {
+        CommandBufferInfo* cmdBufferInfo = android::base::find(mCmdBufferInfo, commandBuffer);
+        FramebufferInfo* fbInfo =
+            android::base::find(mFramebufferInfo, pRenderPassBegin->framebuffer);
+        cmdBufferInfo->releasedColorBuffers.insert(fbInfo->attachedColorBuffers.begin(),
+                                                   fbInfo->attachedColorBuffers.end());
+    }
+
+    void on_vkCmdBeginRenderPass(android::base::BumpPool* pool, VkCommandBuffer boxed_commandBuffer,
+                                 const VkRenderPassBeginInfo* pRenderPassBegin,
+                                 VkSubpassContents contents) {
+        auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
+        auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
+        registerRenderPassBeginInfo(commandBuffer, pRenderPassBegin);
+        vk->vkCmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
+    }
+
+    void on_vkCmdBeginRenderPass2(android::base::BumpPool* pool,
+                                  VkCommandBuffer boxed_commandBuffer,
+                                  const VkRenderPassBeginInfo* pRenderPassBegin,
+                                  const VkSubpassBeginInfo* pSubpassBeginInfo) {
+        auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
+        auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
+        registerRenderPassBeginInfo(commandBuffer, pRenderPassBegin);
+        vk->vkCmdBeginRenderPass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+    }
+
+    void on_vkCmdBeginRenderPass2KHR(android::base::BumpPool* pool,
+                                     VkCommandBuffer boxed_commandBuffer,
+                                     const VkRenderPassBeginInfo* pRenderPassBegin,
+                                     const VkSubpassBeginInfo* pSubpassBeginInfo) {
+        on_vkCmdBeginRenderPass2(pool, boxed_commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+    }
+
     void on_vkCmdCopyQueryPoolResults(android::base::BumpPool* pool,
                                       VkCommandBuffer boxed_commandBuffer, VkQueryPool queryPool,
                                       uint32_t firstQuery, uint32_t queryCount, VkBuffer dstBuffer,
@@ -5122,6 +5281,18 @@ class VkDecoderGlobalState::Impl {
 
         auto& framebufferInfo = mFramebufferInfo[*pFramebuffer];
         framebufferInfo.device = device;
+
+        // b/327522469
+        // Track the Colorbuffers that would be written to.
+        // It might be better to check for VK_QUEUE_FAMILY_EXTERNAL in pipeline barrier.
+        // But the guest does not always add it to pipeline barrier.
+        for (int i = 0; i < pCreateInfo->attachmentCount; i++) {
+            auto* imageViewInfo = android::base::find(mImageViewInfo, pCreateInfo->pAttachments[i]);
+            if (imageViewInfo->boundColorBuffer.has_value()) {
+                framebufferInfo.attachedColorBuffers.push_back(
+                    imageViewInfo->boundColorBuffer.value());
+            }
+        }
 
         *pFramebuffer = new_boxed_non_dispatchable_VkFramebuffer(*pFramebuffer);
 
@@ -5949,7 +6120,7 @@ class VkDecoderGlobalState::Impl {
         if (!elt) return 0;                                                                       \
         auto stream = elt->readStream;                                                            \
         if (!stream) {                                                                            \
-            stream = sReadStreamRegistry.pop();                                                   \
+            stream = sReadStreamRegistry.pop(getFeatures());                                      \
             elt->readStream = stream;                                                             \
         }                                                                                         \
         return stream;                                                                            \
@@ -5981,7 +6152,7 @@ class VkDecoderGlobalState::Impl {
     void set_boxed_non_dispatchable_##type(type boxed, type underlying) {                         \
         DispatchableHandleInfo<uint64_t> item;                                                    \
         item.underlying = (uint64_t)underlying;                                                   \
-        sBoxedHandleManager.addFixed((uint64_t)boxed, item, Tag_##type);                          \
+        sBoxedHandleManager.update((uint64_t)boxed, item, Tag_##type);                          \
     }                                                                                             \
     type unboxed_to_boxed_non_dispatchable_##type(type unboxed) {                                 \
         AutoLock lock(sBoxedHandleManager.lock);                                                  \
@@ -6516,6 +6687,9 @@ class VkDecoderGlobalState::Impl {
         VkPipelineLayout descriptorLayout = VK_NULL_HANDLE;
         std::vector<VkDescriptorSet> descriptorSets;
         std::vector<uint32_t> dynamicOffsets;
+        std::unordered_set<HandleType> acquiredColorBuffers;
+        std::unordered_set<HandleType> releasedColorBuffers;
+        std::unordered_map<HandleType, VkImageLayout> cbLayouts;
 
         void reset() {
             preprocessFuncs.clear();
@@ -6525,6 +6699,9 @@ class VkDecoderGlobalState::Impl {
             descriptorLayout = VK_NULL_HANDLE;
             descriptorSets.clear();
             dynamicOffsets.clear();
+            acquiredColorBuffers.clear();
+            releasedColorBuffers.clear();
+            cbLayouts.clear();
         }
     };
 
@@ -6933,6 +7110,8 @@ void VkDecoderGlobalState::reset() {
 
 // Snapshots
 bool VkDecoderGlobalState::snapshotsEnabled() const { return mImpl->snapshotsEnabled(); }
+
+const gfxstream::host::FeatureSet& VkDecoderGlobalState::getFeatures() const { return mImpl->getFeatures(); }
 
 bool VkDecoderGlobalState::vkCleanupEnabled() const { return mImpl->vkCleanupEnabled(); }
 
@@ -7787,6 +7966,28 @@ void VkDecoderGlobalState::on_vkDestroyRenderPass(android::base::BumpPool* pool,
                                                   VkDevice boxed_device, VkRenderPass renderPass,
                                                   const VkAllocationCallbacks* pAllocator) {
     mImpl->on_vkDestroyRenderPass(pool, boxed_device, renderPass, pAllocator);
+}
+
+void VkDecoderGlobalState::on_vkCmdBeginRenderPass(android::base::BumpPool* pool,
+                                                   VkCommandBuffer commandBuffer,
+                                                   const VkRenderPassBeginInfo* pRenderPassBegin,
+                                                   VkSubpassContents contents) {
+    return mImpl->on_vkCmdBeginRenderPass(pool, commandBuffer, pRenderPassBegin, contents);
+}
+
+void VkDecoderGlobalState::on_vkCmdBeginRenderPass2(android::base::BumpPool* pool,
+                                                    VkCommandBuffer commandBuffer,
+                                                    const VkRenderPassBeginInfo* pRenderPassBegin,
+                                                    const VkSubpassBeginInfo* pSubpassBeginInfo) {
+    return mImpl->on_vkCmdBeginRenderPass2(pool, commandBuffer, pRenderPassBegin,
+                                           pSubpassBeginInfo);
+}
+
+void VkDecoderGlobalState::on_vkCmdBeginRenderPass2KHR(
+    android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo* pRenderPassBegin, const VkSubpassBeginInfo* pSubpassBeginInfo) {
+    return mImpl->on_vkCmdBeginRenderPass2(pool, commandBuffer, pRenderPassBegin,
+                                           pSubpassBeginInfo);
 }
 
 VkResult VkDecoderGlobalState::on_vkCreateFramebuffer(android::base::BumpPool* pool,

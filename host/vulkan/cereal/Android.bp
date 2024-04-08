@@ -8,9 +8,12 @@ package {
 }
 
 cc_library_static {
-    name: "gfxstream_vulkan_cereal_host",
+    name: "libgfxstream_host_vulkan_cereal",
     defaults: ["gfxstream_defaults"],
-    static_libs: ["gfxstream_base"],
+    static_libs: [
+        "gfxstream_base",
+        "libgfxstream_host_features",
+    ],
     srcs: [
         "common/goldfish_vk_extension_structs.cpp",
         "common/goldfish_vk_marshaling.cpp",
@@ -20,11 +23,11 @@ cc_library_static {
         "common/goldfish_vk_transform.cpp",
     ],
     header_libs: [
-        "gfxstream_vulkan_headers",
-        "gfxstream_vulkan_cereal_common",
+        "libgfxstream_vulkan_headers",
+        "libgfxstream_host_vulkan_cereal_common",
     ],
     export_header_lib_headers: [
-        "gfxstream_vulkan_headers",
+        "libgfxstream_vulkan_headers",
     ],
     cflags: [
         "-DVK_ANDROID_native_buffer",

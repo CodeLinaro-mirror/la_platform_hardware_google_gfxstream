@@ -38,11 +38,11 @@ SUPPORTED_FEATURES = [
     "VK_VERSION_1_3",
     # Instance extensions
     "VK_KHR_get_physical_device_properties2",
-    "VK_KHR_sampler_ycbcr_conversion",
     "VK_KHR_external_semaphore_capabilities",
     "VK_KHR_external_memory_capabilities",
     "VK_KHR_external_fence_capabilities",
     "VK_EXT_debug_utils",
+    "VK_EXT_validation_features",
     # Device extensions
     "VK_KHR_storage_buffer_storage_class",
     "VK_KHR_vulkan_memory_model",
@@ -82,6 +82,7 @@ SUPPORTED_FEATURES = [
     "VK_KHR_imageless_framebuffer",
     "VK_KHR_descriptor_update_template",
     "VK_EXT_depth_clip_enable",
+    "VK_EXT_robustness2",
     # see aosp/2736079 + b/268351352
     "VK_EXT_swapchain_maintenance1",
     "VK_KHR_maintenance5",
@@ -113,7 +114,6 @@ SUPPORTED_FEATURES = [
     "VK_EXT_tooling_info",
     "VK_EXT_ycbcr_2plane_444_formats",
     # Host dispatch
-    "VK_EXT_debug_utils",
     "VK_KHR_surface",
     "VK_KHR_swapchain",
     "VK_KHR_xcb_surface",
@@ -148,13 +148,14 @@ HOST_MODULES = ["goldfish_vk_extension_structs", "goldfish_vk_marshaling",
 # we wish run wrappers when the module requires it. For example, `VK_GOOGLE_gfxstream`
 # shouldn't generate a function table entry since it's an internal interface.
 SUPPORTED_MODULES = {
-    "VK_EXT_debug_utils": ["goldfish_vk_dispatch"],
+    "VK_EXT_debug_utils": HOST_MODULES,
+    "VK_EXT_validation_features": HOST_MODULES,
     "VK_KHR_surface": ["goldfish_vk_dispatch"],
     "VK_KHR_xcb_surface": ["goldfish_vk_dispatch"],
     "VK_KHR_win32_surface": ["goldfish_vk_dispatch"],
     "VK_EXT_metal_surface": ["goldfish_vk_dispatch"],
     # VK_MVK_moltenvk doesn't generate a generate dispatch entry for some reason, but should. The
-    # lack of this extension doesn't cause any build failtures though.
+    # lack of this extension doesn't cause any build failures though.
     "VK_MVK_moltenvk": ["goldfish_vk_dispatch"],
     "VK_KHR_external_semaphore_win32" : ["goldfish_vk_dispatch"],
     "VK_KHR_external_memory_win32" : ["goldfish_vk_dispatch"],
