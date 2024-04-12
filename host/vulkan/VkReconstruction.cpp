@@ -59,76 +59,57 @@ void VkReconstruction::save(android::base::Stream* stream) {
     dump();
 #endif
 
-    std::unordered_map<uint64_t, uint64_t> backDeps;
-
-    mHandleReconstructions.forEachLiveComponent_const(
-        [&backDeps](bool live, uint64_t componentHandle, uint64_t entityHandle,
-                    const HandleReconstruction& item) {
-            for (auto handle : item.childHandles) {
-                backDeps[handle] = entityHandle;
-            }
-        });
-
-    std::vector<uint64_t> topoOrder;
-
-    mHandleReconstructions.forEachLiveComponent_const(
-        [&topoOrder, &backDeps](bool live, uint64_t componentHandle, uint64_t entityHandle,
-                                const HandleReconstruction& item) {
-            // Start with populating the roots
-            if (backDeps.find(entityHandle) == backDeps.end()) {
-                DEBUG_RECON("found root: 0x%llx", (unsigned long long)entityHandle);
-                topoOrder.push_back(entityHandle);
-            }
-        });
-
+    std::unordered_map<uint64_t, int> totalParents;
     std::vector<uint64_t> next;
 
-    std::unordered_map<uint64_t, uint64_t> uniqApiRefsToTopoOrder;
-    std::unordered_map<uint64_t, std::vector<uint64_t>> uniqApiRefsByTopoOrder;
-    std::unordered_map<uint64_t, std::vector<uint64_t>> uniqApiRefsByTopoAndDependencyOrder;
+    mHandleReconstructions.forEachLiveComponent_const(
+        [&totalParents, &next](bool live, uint64_t componentHandle, uint64_t entityHandle,
+                               const HandleReconstruction& item) {
+            totalParents[entityHandle] = item.parentHandles.size();
+            if (item.parentHandles.empty()) {
+                next.push_back(entityHandle);
+            }
+        });
 
-    size_t topoLevel = 0;
+    std::vector<std::vector<uint64_t>> handlesByTopoOrder;
 
-    topoOrder = typeTagSortedHandles(topoOrder);
-
-    while (!topoOrder.empty()) {
-        next.clear();
-
-        for (auto handle : topoOrder) {
+    while (!next.empty()) {
+        next = typeTagSortedHandles(next);
+        handlesByTopoOrder.push_back(std::move(next));
+        const std::vector<uint64_t>& current = handlesByTopoOrder.back();
+        for (uint64_t handle : current) {
             auto item = mHandleReconstructions.get(handle);
-            // item could have been deleted.
-            if (!item) {
-                continue;
-            }
-
-            for (auto apiHandle : item->apiRefs) {
-                if (uniqApiRefsToTopoOrder.find(apiHandle) == uniqApiRefsToTopoOrder.end()) {
-                    DEBUG_RECON("level %zu: 0x%llx api ref: 0x%llx", topoLevel,
-                                (unsigned long long)handle, (unsigned long long)apiHandle);
-                    auto& refs = uniqApiRefsByTopoOrder[topoLevel];
-                    refs.push_back(apiHandle);
-                }
-
-                uniqApiRefsToTopoOrder[apiHandle] = topoLevel;
-            }
-
             for (auto childHandle : item->childHandles) {
-                next.push_back(childHandle);
+                if (--totalParents[childHandle] == 0) {
+                    next.push_back(childHandle);
+                }
             }
         }
-
-        next = typeTagSortedHandles(next);
-
-        topoOrder = next;
-        ++topoLevel;
     }
 
-    uniqApiRefsByTopoOrder[topoLevel] = getOrderedUniqueModifyApis();
-    ++topoLevel;
+    std::vector<std::vector<uint64_t>> uniqApiRefsByTopoOrder;
+    uniqApiRefsByTopoOrder.reserve(handlesByTopoOrder.size() + 1);
+    for (const auto& handles : handlesByTopoOrder) {
+        std::vector<uint64_t> nextApis;
+        for (uint64_t handle : handles) {
+            auto item = mHandleReconstructions.get(handle);
+            for (uint64_t apiRef : item->apiRefs) {
+#if DEBUG_RECONSTRUCTION
+                auto apiItem = mApiTrace.get(apiRef);
+                DEBUG_RECON("adding handle 0x%lx API 0x%lx op code %d\n", handle, apiRef,
+                            apiItem->opCode);
+#endif
+                nextApis.push_back(apiRef);
+            }
+        }
+        uniqApiRefsByTopoOrder.push_back(std::move(nextApis));
+    }
+
+    uniqApiRefsByTopoOrder.push_back(getOrderedUniqueModifyApis());
 
     size_t totalApiTraceSize = 0;  // 4 bytes to store size of created handles
 
-    for (size_t i = 0; i < topoLevel; ++i) {
+    for (size_t i = 0; i < uniqApiRefsByTopoOrder.size(); ++i) {
         for (auto apiHandle : uniqApiRefsByTopoOrder[i]) {
             auto item = mApiTrace.get(apiHandle);
             totalApiTraceSize += 4;                 // opcode
@@ -141,11 +122,11 @@ void VkReconstruction::save(android::base::Stream* stream) {
 
     std::vector<uint64_t> createdHandleBuffer;
 
-    for (size_t i = 0; i < topoLevel; ++i) {
+    for (size_t i = 0; i < uniqApiRefsByTopoOrder.size(); ++i) {
         for (auto apiHandle : uniqApiRefsByTopoOrder[i]) {
             auto item = mApiTrace.get(apiHandle);
             for (auto createdHandle : item->createdHandles) {
-                DEBUG_RECON("save handle: 0x%llx\n", createdHandle);
+                DEBUG_RECON("save handle: 0x%lx\n", createdHandle);
                 createdHandleBuffer.push_back(createdHandle);
             }
         }
@@ -156,10 +137,11 @@ void VkReconstruction::save(android::base::Stream* stream) {
 
     uint8_t* apiTracePtr = apiTraceBuffer.data();
 
-    for (size_t i = 0; i < topoLevel; ++i) {
+    for (size_t i = 0; i < uniqApiRefsByTopoOrder.size(); ++i) {
         for (auto apiHandle : uniqApiRefsByTopoOrder[i]) {
             auto item = mApiTrace.get(apiHandle);
             // 4 bytes for opcode, and 4 bytes for saveBufferRaw's size field
+            DEBUG_RECON("saving api handle 0x%lx op code %d\n", apiHandle, item->opCode);
             memcpy(apiTracePtr, &item->opCode, sizeof(uint32_t));
             apiTracePtr += 4;
             uint32_t traceBytesForSnapshot = item->traceBytes + 8;
@@ -352,22 +334,37 @@ void VkReconstruction::addHandles(const uint64_t* toAdd, uint32_t count) {
     }
 }
 
-void VkReconstruction::removeHandles(const uint64_t* toRemove, uint32_t count) {
+void VkReconstruction::removeHandles(const uint64_t* toRemove, uint32_t count, bool recursive) {
     if (!toRemove) return;
-
-    forEachHandleDeleteApi(toRemove, count);
 
     for (uint32_t i = 0; i < count; ++i) {
         DEBUG_RECON("remove 0x%llx", (unsigned long long)toRemove[i]);
         auto item = mHandleReconstructions.get(toRemove[i]);
-
+        // Delete can happen in arbitrary order.
+        // It might delete the parents before children, which will automatically remove
+        // the name.
         if (!item) continue;
 
-        mHandleReconstructions.remove(toRemove[i]);
-
-        removeHandles(item->childHandles.data(), item->childHandles.size());
-
+        if (!recursive && item->childHandles.size()) {
+            // TODO(b/330769702): perform delayed destroy when all children are destroyed.
+            DEBUG_RECON("delay destroy of 0x%lx, TODO: actually destroy it", toRemove[i]);
+            item->destroyed = true;
+            continue;
+        }
+        for (uint64_t parentHandle : item->parentHandles) {
+            auto parentItem = mHandleReconstructions.get(parentHandle);
+            if (!parentItem) {
+                continue;
+            }
+            parentItem->childHandles.erase(toRemove[i]);
+        }
+        forEachHandleDeleteApi(toRemove + i, 1);
+        // Keep a local copy because removeHandles will mess up
+        // item->childHandles iterators.
+        std::vector<uint64_t> childHandles(item->childHandles.begin(), item->childHandles.end());
+        removeHandles(childHandles.data(), childHandles.size());
         item->childHandles.clear();
+        mHandleReconstructions.remove(toRemove[i]);
     }
 }
 
@@ -381,6 +378,7 @@ void VkReconstruction::forEachHandleAddApi(const uint64_t* toProcess, uint32_t c
         if (!item) continue;
 
         item->apiRefs.push_back(apiHandle);
+        DEBUG_RECON("handle 0x%lx added api 0x%lx", toProcess[i], apiHandle);
     }
 }
 
@@ -388,6 +386,7 @@ void VkReconstruction::forEachHandleDeleteApi(const uint64_t* toProcess, uint32_
     if (!toProcess) return;
 
     for (uint32_t i = 0; i < count; ++i) {
+        DEBUG_RECON("deleting api for 0x%lx\n", toProcess[i]);
         auto item = mHandleReconstructions.get(toProcess[i]);
 
         if (!item) continue;
@@ -410,12 +409,20 @@ void VkReconstruction::addHandleDependency(const uint64_t* handles, uint32_t cou
                                            uint64_t parentHandle) {
     if (!handles) return;
 
-    auto item = mHandleReconstructions.get(parentHandle);
+    auto parentItem = mHandleReconstructions.get(parentHandle);
 
-    if (!item) return;
+    if (!parentItem) {
+        DEBUG_RECON("WARN: adding null parent item: 0x%lx\n", parentHandle);
+        return;
+    }
 
     for (uint32_t i = 0; i < count; ++i) {
-        item->childHandles.push_back(handles[i]);
+        auto childItem = mHandleReconstructions.get(handles[i]);
+        if (!childItem) {
+            continue;
+        }
+        parentItem->childHandles.insert(handles[i]);
+        childItem->parentHandles.push_back(parentHandle);
     }
 }
 
@@ -427,9 +434,14 @@ void VkReconstruction::setCreatedHandlesForApi(uint64_t apiHandle, const uint64_
 
     if (!item) return;
 
-    for (uint32_t i = 0; i < count; ++i) {
-        item->createdHandles.push_back(created[i]);
-    }
+    item->createdHandles.insert(item->createdHandles.end(), created, created + count);
+    item->createdHandles.insert(item->createdHandles.end(), mExtraHandlesForNextApi.begin(),
+                                mExtraHandlesForNextApi.end());
+    mExtraHandlesForNextApi.clear();
+}
+
+void VkReconstruction::createExtraHandlesForNextApi(const uint64_t* created, uint32_t count) {
+    mExtraHandlesForNextApi.assign(created, created + count);
 }
 
 void VkReconstruction::forEachHandleAddModifyApi(const uint64_t* toProcess, uint32_t count,

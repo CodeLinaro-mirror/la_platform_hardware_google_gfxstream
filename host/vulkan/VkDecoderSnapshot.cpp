@@ -52,15 +52,18 @@ class VkDecoderSnapshot::Impl {
         mReconstruction.load(stream, gfx_logger, healthMonitor);
     }
 
+    void createExtraHandlesForNextApi(const uint64_t* created, uint32_t count) {
+        mReconstruction.createExtraHandlesForNextApi(created, count);
+    }
 #ifdef VK_VERSION_1_0
     void vkCreateInstance(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                           android::base::BumpPool* pool, VkResult input_result,
                           const VkInstanceCreateInfo* pCreateInfo,
                           const VkAllocationCallbacks* pAllocator, VkInstance* pInstance) {
+        if (!pInstance) return;
         android::base::AutoLock lock(mLock);
         // pInstance create
         mReconstruction.addHandles((const uint64_t*)pInstance, 1);
-        if (!pInstance) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateInstance, snapshotTraceBegin,
@@ -73,19 +76,19 @@ class VkDecoderSnapshot::Impl {
                            const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // instance destroy
-        mReconstruction.removeHandles((const uint64_t*)(&instance), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&instance), 1, true);
     }
     void vkEnumeratePhysicalDevices(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                     android::base::BumpPool* pool, VkResult input_result,
                                     VkInstance instance, uint32_t* pPhysicalDeviceCount,
                                     VkPhysicalDevice* pPhysicalDevices) {
+        if (!pPhysicalDevices) return;
         android::base::AutoLock lock(mLock);
         // pPhysicalDevices create
         mReconstruction.addHandles((const uint64_t*)pPhysicalDevices, (*(pPhysicalDeviceCount)));
         mReconstruction.addHandleDependency((const uint64_t*)pPhysicalDevices,
                                             (*(pPhysicalDeviceCount)),
                                             (uint64_t)(uintptr_t)instance);
-        if (!pPhysicalDevices) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkEnumeratePhysicalDevices, snapshotTraceBegin,
@@ -136,12 +139,12 @@ class VkDecoderSnapshot::Impl {
                         android::base::BumpPool* pool, VkResult input_result,
                         VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* pCreateInfo,
                         const VkAllocationCallbacks* pAllocator, VkDevice* pDevice) {
+        if (!pDevice) return;
         android::base::AutoLock lock(mLock);
         // pDevice create
         mReconstruction.addHandles((const uint64_t*)pDevice, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pDevice, 1,
                                             (uint64_t)(uintptr_t)physicalDevice);
-        if (!pDevice) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateDevice, snapshotTraceBegin,
@@ -154,7 +157,7 @@ class VkDecoderSnapshot::Impl {
                          const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // device destroy
-        mReconstruction.removeHandles((const uint64_t*)(&device), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&device), 1, true);
     }
     void vkEnumerateInstanceExtensionProperties(const uint8_t* snapshotTraceBegin,
                                                 size_t snapshotTraceBytes,
@@ -181,12 +184,12 @@ class VkDecoderSnapshot::Impl {
     void vkGetDeviceQueue(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                           android::base::BumpPool* pool, VkDevice device, uint32_t queueFamilyIndex,
                           uint32_t queueIndex, VkQueue* pQueue) {
+        if (!pQueue) return;
         android::base::AutoLock lock(mLock);
         // pQueue create
         mReconstruction.addHandles((const uint64_t*)pQueue, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pQueue, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pQueue) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkGetDeviceQueue, snapshotTraceBegin,
@@ -205,12 +208,12 @@ class VkDecoderSnapshot::Impl {
                           android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                           const VkMemoryAllocateInfo* pAllocateInfo,
                           const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory) {
+        if (!pMemory) return;
         android::base::AutoLock lock(mLock);
         // pMemory create
         mReconstruction.addHandles((const uint64_t*)pMemory, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pMemory, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pMemory) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkAllocateMemory, snapshotTraceBegin,
@@ -223,7 +226,7 @@ class VkDecoderSnapshot::Impl {
                       const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // memory destroy
-        mReconstruction.removeHandles((const uint64_t*)(&memory), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&memory), 1, true);
     }
     void vkMapMemory(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                      android::base::BumpPool* pool, VkResult input_result, VkDevice device,
@@ -250,16 +253,18 @@ class VkDecoderSnapshot::Impl {
     void vkBindImageMemory(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                            android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                            VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset) {
+        VkImage boxed_VkImage = unboxed_to_boxed_non_dispatchable_VkImage((&image)[0]);
         android::base::AutoLock lock(mLock);
-        // image modify
+        // image create
+        mReconstruction.addHandleDependency(
+            (const uint64_t*)&boxed_VkImage, 1,
+            (uint64_t)(uintptr_t)(uint64_t)(uintptr_t)
+                unboxed_to_boxed_non_dispatchable_VkDeviceMemory(memory));
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkBindImageMemory, snapshotTraceBegin,
                                     snapshotTraceBytes);
-        for (uint32_t i = 0; i < 1; ++i) {
-            VkImage boxed = unboxed_to_boxed_non_dispatchable_VkImage((&image)[i]);
-            mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-        }
+        mReconstruction.forEachHandleAddApi((const uint64_t*)&boxed_VkImage, 1, apiHandle);
     }
     void vkGetBufferMemoryRequirements(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                        android::base::BumpPool* pool, VkDevice device,
@@ -285,12 +290,12 @@ class VkDecoderSnapshot::Impl {
                        android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                        const VkFenceCreateInfo* pCreateInfo,
                        const VkAllocationCallbacks* pAllocator, VkFence* pFence) {
+        if (!pFence) return;
         android::base::AutoLock lock(mLock);
         // pFence create
         mReconstruction.addHandles((const uint64_t*)pFence, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pFence, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pFence) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateFence, snapshotTraceBegin,
@@ -303,7 +308,7 @@ class VkDecoderSnapshot::Impl {
                         const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // fence destroy
-        mReconstruction.removeHandles((const uint64_t*)(&fence), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&fence), 1, true);
     }
     void vkResetFences(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                        android::base::BumpPool* pool, VkResult input_result, VkDevice device,
@@ -319,12 +324,12 @@ class VkDecoderSnapshot::Impl {
                            android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                            const VkSemaphoreCreateInfo* pCreateInfo,
                            const VkAllocationCallbacks* pAllocator, VkSemaphore* pSemaphore) {
+        if (!pSemaphore) return;
         android::base::AutoLock lock(mLock);
         // pSemaphore create
         mReconstruction.addHandles((const uint64_t*)pSemaphore, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pSemaphore, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pSemaphore) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateSemaphore, snapshotTraceBegin,
@@ -337,18 +342,18 @@ class VkDecoderSnapshot::Impl {
                             const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // semaphore destroy
-        mReconstruction.removeHandles((const uint64_t*)(&semaphore), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&semaphore), 1, true);
     }
     void vkCreateEvent(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                        android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                        const VkEventCreateInfo* pCreateInfo,
                        const VkAllocationCallbacks* pAllocator, VkEvent* pEvent) {
+        if (!pEvent) return;
         android::base::AutoLock lock(mLock);
         // pEvent create
         mReconstruction.addHandles((const uint64_t*)pEvent, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pEvent, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pEvent) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateEvent, snapshotTraceBegin,
@@ -361,7 +366,7 @@ class VkDecoderSnapshot::Impl {
                         const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // event destroy
-        mReconstruction.removeHandles((const uint64_t*)(&event), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&event), 1, true);
     }
     void vkGetEventStatus(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                           android::base::BumpPool* pool, VkResult input_result, VkDevice device,
@@ -376,12 +381,12 @@ class VkDecoderSnapshot::Impl {
                            android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                            const VkQueryPoolCreateInfo* pCreateInfo,
                            const VkAllocationCallbacks* pAllocator, VkQueryPool* pQueryPool) {
+        if (!pQueryPool) return;
         android::base::AutoLock lock(mLock);
         // pQueryPool create
         mReconstruction.addHandles((const uint64_t*)pQueryPool, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pQueryPool, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pQueryPool) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateQueryPool, snapshotTraceBegin,
@@ -394,7 +399,7 @@ class VkDecoderSnapshot::Impl {
                             const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // queryPool destroy
-        mReconstruction.removeHandles((const uint64_t*)(&queryPool), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&queryPool), 1, true);
     }
     void vkGetQueryPoolResults(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                android::base::BumpPool* pool, VkResult input_result,
@@ -405,12 +410,12 @@ class VkDecoderSnapshot::Impl {
                         android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                         const VkBufferCreateInfo* pCreateInfo,
                         const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer) {
+        if (!pBuffer) return;
         android::base::AutoLock lock(mLock);
         // pBuffer create
         mReconstruction.addHandles((const uint64_t*)pBuffer, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pBuffer, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pBuffer) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateBuffer, snapshotTraceBegin,
@@ -423,17 +428,17 @@ class VkDecoderSnapshot::Impl {
                          const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // buffer destroy
-        mReconstruction.removeHandles((const uint64_t*)(&buffer), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&buffer), 1, true);
     }
     void vkCreateBufferView(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                             android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                             const VkBufferViewCreateInfo* pCreateInfo,
                             const VkAllocationCallbacks* pAllocator, VkBufferView* pView) {
+        if (!pView) return;
         android::base::AutoLock lock(mLock);
         // pView create
         mReconstruction.addHandles((const uint64_t*)pView, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pView, 1, (uint64_t)(uintptr_t)device);
-        if (!pView) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateBufferView, snapshotTraceBegin,
@@ -446,18 +451,18 @@ class VkDecoderSnapshot::Impl {
                              VkBufferView bufferView, const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // bufferView destroy
-        mReconstruction.removeHandles((const uint64_t*)(&bufferView), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&bufferView), 1, true);
     }
     void vkCreateImage(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                        android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                        const VkImageCreateInfo* pCreateInfo,
                        const VkAllocationCallbacks* pAllocator, VkImage* pImage) {
+        if (!pImage) return;
         android::base::AutoLock lock(mLock);
         // pImage create
         mReconstruction.addHandles((const uint64_t*)pImage, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pImage, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pImage) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateImage, snapshotTraceBegin,
@@ -470,7 +475,7 @@ class VkDecoderSnapshot::Impl {
                         const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // image destroy
-        mReconstruction.removeHandles((const uint64_t*)(&image), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&image), 1, true);
     }
     void vkGetImageSubresourceLayout(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                      android::base::BumpPool* pool, VkDevice device, VkImage image,
@@ -480,11 +485,14 @@ class VkDecoderSnapshot::Impl {
                            android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                            const VkImageViewCreateInfo* pCreateInfo,
                            const VkAllocationCallbacks* pAllocator, VkImageView* pView) {
+        if (!pView) return;
         android::base::AutoLock lock(mLock);
         // pView create
         mReconstruction.addHandles((const uint64_t*)pView, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pView, 1, (uint64_t)(uintptr_t)device);
-        if (!pView) return;
+        mReconstruction.addHandleDependency(
+            (const uint64_t*)pView, 1,
+            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkImage(pCreateInfo->image));
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateImageView, snapshotTraceBegin,
@@ -497,19 +505,19 @@ class VkDecoderSnapshot::Impl {
                             const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // imageView destroy
-        mReconstruction.removeHandles((const uint64_t*)(&imageView), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&imageView), 1, true);
     }
     void vkCreateShaderModule(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                               android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                               const VkShaderModuleCreateInfo* pCreateInfo,
                               const VkAllocationCallbacks* pAllocator,
                               VkShaderModule* pShaderModule) {
+        if (!pShaderModule) return;
         android::base::AutoLock lock(mLock);
         // pShaderModule create
         mReconstruction.addHandles((const uint64_t*)pShaderModule, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pShaderModule, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pShaderModule) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateShaderModule, snapshotTraceBegin,
@@ -523,19 +531,19 @@ class VkDecoderSnapshot::Impl {
                                const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // shaderModule destroy
-        mReconstruction.removeHandles((const uint64_t*)(&shaderModule), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&shaderModule), 1, false);
     }
     void vkCreatePipelineCache(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                android::base::BumpPool* pool, VkResult input_result,
                                VkDevice device, const VkPipelineCacheCreateInfo* pCreateInfo,
                                const VkAllocationCallbacks* pAllocator,
                                VkPipelineCache* pPipelineCache) {
+        if (!pPipelineCache) return;
         android::base::AutoLock lock(mLock);
         // pPipelineCache create
         mReconstruction.addHandles((const uint64_t*)pPipelineCache, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pPipelineCache, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pPipelineCache) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreatePipelineCache, snapshotTraceBegin,
@@ -549,7 +557,7 @@ class VkDecoderSnapshot::Impl {
                                 const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // pipelineCache destroy
-        mReconstruction.removeHandles((const uint64_t*)(&pipelineCache), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&pipelineCache), 1, true);
     }
     void vkGetPipelineCacheData(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                 android::base::BumpPool* pool, VkResult input_result,
@@ -566,12 +574,20 @@ class VkDecoderSnapshot::Impl {
                                    const VkGraphicsPipelineCreateInfo* pCreateInfos,
                                    const VkAllocationCallbacks* pAllocator,
                                    VkPipeline* pPipelines) {
+        if (!pPipelines) return;
         android::base::AutoLock lock(mLock);
         // pPipelines create
         mReconstruction.addHandles((const uint64_t*)pPipelines, ((createInfoCount)));
         mReconstruction.addHandleDependency((const uint64_t*)pPipelines, ((createInfoCount)),
                                             (uint64_t)(uintptr_t)device);
-        if (!pPipelines) return;
+        for (uint32_t i = 0; i < createInfoCount; ++i) {
+            for (uint32_t j = 0; j < pCreateInfos[i].stageCount; ++j) {
+                mReconstruction.addHandleDependency(
+                    (const uint64_t*)(pPipelines + i), 1,
+                    (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkShaderModule(
+                        pCreateInfos[i].pStages[j].module));
+            }
+        }
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateGraphicsPipelines, snapshotTraceBegin,
@@ -587,12 +603,12 @@ class VkDecoderSnapshot::Impl {
                                   uint32_t createInfoCount,
                                   const VkComputePipelineCreateInfo* pCreateInfos,
                                   const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines) {
+        if (!pPipelines) return;
         android::base::AutoLock lock(mLock);
         // pPipelines create
         mReconstruction.addHandles((const uint64_t*)pPipelines, ((createInfoCount)));
         mReconstruction.addHandleDependency((const uint64_t*)pPipelines, ((createInfoCount)),
                                             (uint64_t)(uintptr_t)device);
-        if (!pPipelines) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateComputePipelines, snapshotTraceBegin,
@@ -607,19 +623,19 @@ class VkDecoderSnapshot::Impl {
                            const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // pipeline destroy
-        mReconstruction.removeHandles((const uint64_t*)(&pipeline), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&pipeline), 1, true);
     }
     void vkCreatePipelineLayout(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                 android::base::BumpPool* pool, VkResult input_result,
                                 VkDevice device, const VkPipelineLayoutCreateInfo* pCreateInfo,
                                 const VkAllocationCallbacks* pAllocator,
                                 VkPipelineLayout* pPipelineLayout) {
+        if (!pPipelineLayout) return;
         android::base::AutoLock lock(mLock);
         // pPipelineLayout create
         mReconstruction.addHandles((const uint64_t*)pPipelineLayout, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pPipelineLayout, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pPipelineLayout) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreatePipelineLayout, snapshotTraceBegin,
@@ -633,18 +649,18 @@ class VkDecoderSnapshot::Impl {
                                  const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // pipelineLayout destroy
-        mReconstruction.removeHandles((const uint64_t*)(&pipelineLayout), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&pipelineLayout), 1, true);
     }
     void vkCreateSampler(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                          android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                          const VkSamplerCreateInfo* pCreateInfo,
                          const VkAllocationCallbacks* pAllocator, VkSampler* pSampler) {
+        if (!pSampler) return;
         android::base::AutoLock lock(mLock);
         // pSampler create
         mReconstruction.addHandles((const uint64_t*)pSampler, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pSampler, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pSampler) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateSampler, snapshotTraceBegin,
@@ -657,7 +673,7 @@ class VkDecoderSnapshot::Impl {
                           const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // sampler destroy
-        mReconstruction.removeHandles((const uint64_t*)(&sampler), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&sampler), 1, true);
     }
     void vkCreateDescriptorSetLayout(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                      android::base::BumpPool* pool, VkResult input_result,
@@ -665,12 +681,12 @@ class VkDecoderSnapshot::Impl {
                                      const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
                                      const VkAllocationCallbacks* pAllocator,
                                      VkDescriptorSetLayout* pSetLayout) {
+        if (!pSetLayout) return;
         android::base::AutoLock lock(mLock);
         // pSetLayout create
         mReconstruction.addHandles((const uint64_t*)pSetLayout, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pSetLayout, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pSetLayout) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateDescriptorSetLayout, snapshotTraceBegin,
@@ -684,19 +700,19 @@ class VkDecoderSnapshot::Impl {
                                       const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // descriptorSetLayout destroy
-        mReconstruction.removeHandles((const uint64_t*)(&descriptorSetLayout), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&descriptorSetLayout), 1, true);
     }
     void vkCreateDescriptorPool(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                 android::base::BumpPool* pool, VkResult input_result,
                                 VkDevice device, const VkDescriptorPoolCreateInfo* pCreateInfo,
                                 const VkAllocationCallbacks* pAllocator,
                                 VkDescriptorPool* pDescriptorPool) {
+        if (!pDescriptorPool) return;
         android::base::AutoLock lock(mLock);
         // pDescriptorPool create
         mReconstruction.addHandles((const uint64_t*)pDescriptorPool, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pDescriptorPool, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pDescriptorPool) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateDescriptorPool, snapshotTraceBegin,
@@ -710,7 +726,7 @@ class VkDecoderSnapshot::Impl {
                                  const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // descriptorPool destroy
-        mReconstruction.removeHandles((const uint64_t*)(&descriptorPool), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&descriptorPool), 1, true);
     }
     void vkResetDescriptorPool(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                android::base::BumpPool* pool, VkResult input_result,
@@ -720,6 +736,7 @@ class VkDecoderSnapshot::Impl {
                                   android::base::BumpPool* pool, VkResult input_result,
                                   VkDevice device, const VkDescriptorSetAllocateInfo* pAllocateInfo,
                                   VkDescriptorSet* pDescriptorSets) {
+        if (!pDescriptorSets) return;
         android::base::AutoLock lock(mLock);
         // pDescriptorSets create
         mReconstruction.addHandles((const uint64_t*)pDescriptorSets,
@@ -727,7 +744,6 @@ class VkDecoderSnapshot::Impl {
         mReconstruction.addHandleDependency((const uint64_t*)pDescriptorSets,
                                             pAllocateInfo->descriptorSetCount,
                                             (uint64_t)(uintptr_t)device);
-        if (!pDescriptorSets) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkAllocateDescriptorSets, snapshotTraceBegin,
@@ -743,7 +759,8 @@ class VkDecoderSnapshot::Impl {
                               const VkDescriptorSet* pDescriptorSets) {
         android::base::AutoLock lock(mLock);
         // pDescriptorSets destroy
-        mReconstruction.removeHandles((const uint64_t*)pDescriptorSets, ((descriptorSetCount)));
+        mReconstruction.removeHandles((const uint64_t*)pDescriptorSets, ((descriptorSetCount)),
+                                      true);
     }
     void vkUpdateDescriptorSets(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                 android::base::BumpPool* pool, VkDevice device,
@@ -755,12 +772,22 @@ class VkDecoderSnapshot::Impl {
                              android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                              const VkFramebufferCreateInfo* pCreateInfo,
                              const VkAllocationCallbacks* pAllocator, VkFramebuffer* pFramebuffer) {
+        if (!pFramebuffer) return;
         android::base::AutoLock lock(mLock);
         // pFramebuffer create
         mReconstruction.addHandles((const uint64_t*)pFramebuffer, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pFramebuffer, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pFramebuffer) return;
+        mReconstruction.addHandleDependency(
+            (const uint64_t*)pFramebuffer, 1,
+            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkRenderPass(
+                pCreateInfo->renderPass));
+        for (uint32_t i = 0; i < pCreateInfo->attachmentCount; ++i) {
+            mReconstruction.addHandleDependency(
+                (const uint64_t*)pFramebuffer, 1,
+                (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkImageView(
+                    pCreateInfo->pAttachments[i]));
+        }
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateFramebuffer, snapshotTraceBegin,
@@ -773,18 +800,18 @@ class VkDecoderSnapshot::Impl {
                               VkFramebuffer framebuffer, const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // framebuffer destroy
-        mReconstruction.removeHandles((const uint64_t*)(&framebuffer), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&framebuffer), 1, true);
     }
     void vkCreateRenderPass(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                             android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                             const VkRenderPassCreateInfo* pCreateInfo,
                             const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass) {
+        if (!pRenderPass) return;
         android::base::AutoLock lock(mLock);
         // pRenderPass create
         mReconstruction.addHandles((const uint64_t*)pRenderPass, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pRenderPass, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pRenderPass) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateRenderPass, snapshotTraceBegin,
@@ -797,7 +824,7 @@ class VkDecoderSnapshot::Impl {
                              VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // renderPass destroy
-        mReconstruction.removeHandles((const uint64_t*)(&renderPass), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&renderPass), 1, true);
     }
     void vkGetRenderAreaGranularity(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                     android::base::BumpPool* pool, VkDevice device,
@@ -806,12 +833,12 @@ class VkDecoderSnapshot::Impl {
                              android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                              const VkCommandPoolCreateInfo* pCreateInfo,
                              const VkAllocationCallbacks* pAllocator, VkCommandPool* pCommandPool) {
+        if (!pCommandPool) return;
         android::base::AutoLock lock(mLock);
         // pCommandPool create
         mReconstruction.addHandles((const uint64_t*)pCommandPool, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pCommandPool, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pCommandPool) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateCommandPool, snapshotTraceBegin,
@@ -824,7 +851,7 @@ class VkDecoderSnapshot::Impl {
                               VkCommandPool commandPool, const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // commandPool destroy
-        mReconstruction.removeHandles((const uint64_t*)(&commandPool), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&commandPool), 1, true);
     }
     void vkResetCommandPool(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                             android::base::BumpPool* pool, VkResult input_result, VkDevice device,
@@ -833,6 +860,7 @@ class VkDecoderSnapshot::Impl {
                                   android::base::BumpPool* pool, VkResult input_result,
                                   VkDevice device, const VkCommandBufferAllocateInfo* pAllocateInfo,
                                   VkCommandBuffer* pCommandBuffers) {
+        if (!pCommandBuffers) return;
         android::base::AutoLock lock(mLock);
         // pCommandBuffers create
         mReconstruction.addHandles((const uint64_t*)pCommandBuffers,
@@ -841,7 +869,6 @@ class VkDecoderSnapshot::Impl {
             (const uint64_t*)pCommandBuffers, pAllocateInfo->commandBufferCount,
             (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkCommandPool(
                 pAllocateInfo->commandPool));
-        if (!pCommandBuffers) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkAllocateCommandBuffers, snapshotTraceBegin,
@@ -857,7 +884,8 @@ class VkDecoderSnapshot::Impl {
                               const VkCommandBuffer* pCommandBuffers) {
         android::base::AutoLock lock(mLock);
         // pCommandBuffers destroy
-        mReconstruction.removeHandles((const uint64_t*)pCommandBuffers, ((commandBufferCount)));
+        mReconstruction.removeHandles((const uint64_t*)pCommandBuffers, ((commandBufferCount)),
+                                      true);
     }
     void vkBeginCommandBuffer(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                               android::base::BumpPool* pool, VkResult input_result,
@@ -1121,12 +1149,12 @@ class VkDecoderSnapshot::Impl {
     void vkGetDeviceQueue2(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                            android::base::BumpPool* pool, VkDevice device,
                            const VkDeviceQueueInfo2* pQueueInfo, VkQueue* pQueue) {
+        if (!pQueue) return;
         android::base::AutoLock lock(mLock);
         // pQueue create
         mReconstruction.addHandles((const uint64_t*)pQueue, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pQueue, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pQueue) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkGetDeviceQueue2, snapshotTraceBegin,
@@ -1140,12 +1168,12 @@ class VkDecoderSnapshot::Impl {
                                         const VkSamplerYcbcrConversionCreateInfo* pCreateInfo,
                                         const VkAllocationCallbacks* pAllocator,
                                         VkSamplerYcbcrConversion* pYcbcrConversion) {
+        if (!pYcbcrConversion) return;
         android::base::AutoLock lock(mLock);
         // pYcbcrConversion create
         mReconstruction.addHandles((const uint64_t*)pYcbcrConversion, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pYcbcrConversion, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pYcbcrConversion) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateSamplerYcbcrConversion, snapshotTraceBegin,
@@ -1159,7 +1187,7 @@ class VkDecoderSnapshot::Impl {
                                          const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // ycbcrConversion destroy
-        mReconstruction.removeHandles((const uint64_t*)(&ycbcrConversion), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&ycbcrConversion), 1, true);
     }
     void vkCreateDescriptorUpdateTemplate(const uint8_t* snapshotTraceBegin,
                                           size_t snapshotTraceBytes, android::base::BumpPool* pool,
@@ -1167,12 +1195,12 @@ class VkDecoderSnapshot::Impl {
                                           const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
                                           const VkAllocationCallbacks* pAllocator,
                                           VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate) {
+        if (!pDescriptorUpdateTemplate) return;
         android::base::AutoLock lock(mLock);
         // pDescriptorUpdateTemplate create
         mReconstruction.addHandles((const uint64_t*)pDescriptorUpdateTemplate, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pDescriptorUpdateTemplate, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pDescriptorUpdateTemplate) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateDescriptorUpdateTemplate,
@@ -1189,7 +1217,7 @@ class VkDecoderSnapshot::Impl {
                                            const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // descriptorUpdateTemplate destroy
-        mReconstruction.removeHandles((const uint64_t*)(&descriptorUpdateTemplate), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&descriptorUpdateTemplate), 1, true);
     }
     void vkUpdateDescriptorSetWithTemplate(const uint8_t* snapshotTraceBegin,
                                            size_t snapshotTraceBytes, android::base::BumpPool* pool,
@@ -1232,12 +1260,12 @@ class VkDecoderSnapshot::Impl {
                              android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                              const VkRenderPassCreateInfo2* pCreateInfo,
                              const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass) {
+        if (!pRenderPass) return;
         android::base::AutoLock lock(mLock);
         // pRenderPass create
         mReconstruction.addHandles((const uint64_t*)pRenderPass, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pRenderPass, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pRenderPass) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateRenderPass2, snapshotTraceBegin,
@@ -1418,12 +1446,12 @@ class VkDecoderSnapshot::Impl {
                               android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                               const VkSwapchainCreateInfoKHR* pCreateInfo,
                               const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain) {
+        if (!pSwapchain) return;
         android::base::AutoLock lock(mLock);
         // pSwapchain create
         mReconstruction.addHandles((const uint64_t*)pSwapchain, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pSwapchain, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pSwapchain) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateSwapchainKHR, snapshotTraceBegin,
@@ -1436,7 +1464,7 @@ class VkDecoderSnapshot::Impl {
                                VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // swapchain destroy
-        mReconstruction.removeHandles((const uint64_t*)(&swapchain), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&swapchain), 1, true);
     }
     void vkGetSwapchainImagesKHR(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                  android::base::BumpPool* pool, VkResult input_result,
@@ -1561,12 +1589,12 @@ class VkDecoderSnapshot::Impl {
         const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
         const VkAllocationCallbacks* pAllocator,
         VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate) {
+        if (!pDescriptorUpdateTemplate) return;
         android::base::AutoLock lock(mLock);
         // pDescriptorUpdateTemplate create
         mReconstruction.addHandles((const uint64_t*)pDescriptorUpdateTemplate, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pDescriptorUpdateTemplate, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pDescriptorUpdateTemplate) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateDescriptorUpdateTemplateKHR,
@@ -1583,7 +1611,7 @@ class VkDecoderSnapshot::Impl {
                                               const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // descriptorUpdateTemplate destroy
-        mReconstruction.removeHandles((const uint64_t*)(&descriptorUpdateTemplate), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&descriptorUpdateTemplate), 1, true);
     }
     void vkUpdateDescriptorSetWithTemplateKHR(const uint8_t* snapshotTraceBegin,
                                               size_t snapshotTraceBytes,
@@ -1600,12 +1628,12 @@ class VkDecoderSnapshot::Impl {
                                 VkDevice device, const VkRenderPassCreateInfo2* pCreateInfo,
                                 const VkAllocationCallbacks* pAllocator,
                                 VkRenderPass* pRenderPass) {
+        if (!pRenderPass) return;
         android::base::AutoLock lock(mLock);
         // pRenderPass create
         mReconstruction.addHandles((const uint64_t*)pRenderPass, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pRenderPass, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pRenderPass) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateRenderPass2KHR, snapshotTraceBegin,
@@ -1674,12 +1702,12 @@ class VkDecoderSnapshot::Impl {
                                            const VkSamplerYcbcrConversionCreateInfo* pCreateInfo,
                                            const VkAllocationCallbacks* pAllocator,
                                            VkSamplerYcbcrConversion* pYcbcrConversion) {
+        if (!pYcbcrConversion) return;
         android::base::AutoLock lock(mLock);
         // pYcbcrConversion create
         mReconstruction.addHandles((const uint64_t*)pYcbcrConversion, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pYcbcrConversion, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pYcbcrConversion) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateSamplerYcbcrConversionKHR,
@@ -1694,7 +1722,7 @@ class VkDecoderSnapshot::Impl {
                                             const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // ycbcrConversion destroy
-        mReconstruction.removeHandles((const uint64_t*)(&ycbcrConversion), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&ycbcrConversion), 1, true);
     }
 #endif
 #ifdef VK_KHR_bind_memory2
@@ -1936,10 +1964,10 @@ class VkDecoderSnapshot::Impl {
                                         const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
                                         const VkAllocationCallbacks* pAllocator,
                                         VkDebugUtilsMessengerEXT* pMessenger) {
+        if (!pMessenger) return;
         android::base::AutoLock lock(mLock);
         // pMessenger create
         mReconstruction.addHandles((const uint64_t*)pMessenger, 1);
-        if (!pMessenger) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateDebugUtilsMessengerEXT, snapshotTraceBegin,
@@ -1953,7 +1981,7 @@ class VkDecoderSnapshot::Impl {
                                          const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // messenger destroy
-        mReconstruction.removeHandles((const uint64_t*)(&messenger), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&messenger), 1, true);
     }
     void vkSubmitDebugUtilsMessageEXT(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                       android::base::BumpPool* pool, VkInstance instance,
@@ -2178,12 +2206,12 @@ class VkDecoderSnapshot::Impl {
                                              const VkAllocationCallbacks* pAllocator,
                                              VkImage* pImage,
                                              VkMemoryRequirements* pMemoryRequirements) {
+        if (!pImage) return;
         android::base::AutoLock lock(mLock);
         // pImage create
         mReconstruction.addHandles((const uint64_t*)pImage, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pImage, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pImage) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateImageWithRequirementsGOOGLE,
@@ -2196,12 +2224,12 @@ class VkDecoderSnapshot::Impl {
         VkResult input_result, VkDevice device, const VkBufferCreateInfo* pCreateInfo,
         const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer,
         VkMemoryRequirements* pMemoryRequirements) {
+        if (!pBuffer) return;
         android::base::AutoLock lock(mLock);
         // pBuffer create
         mReconstruction.addHandles((const uint64_t*)pBuffer, 1);
         mReconstruction.addHandleDependency((const uint64_t*)pBuffer, 1,
                                             (uint64_t)(uintptr_t)device);
-        if (!pBuffer) return;
         auto apiHandle = mReconstruction.createApiInfo();
         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
         mReconstruction.setApiTrace(apiInfo, OP_vkCreateBufferWithRequirementsGOOGLE,
@@ -2220,7 +2248,7 @@ class VkDecoderSnapshot::Impl {
                                 const VkAllocationCallbacks* pAllocator) {
         android::base::AutoLock lock(mLock);
         // memory destroy
-        mReconstruction.removeHandles((const uint64_t*)(&memory), 1);
+        mReconstruction.removeHandles((const uint64_t*)(&memory), 1, true);
     }
     void vkQueueHostSyncGOOGLE(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                android::base::BumpPool* pool, VkQueue queue, uint32_t needHostSync,
@@ -2318,6 +2346,10 @@ void VkDecoderSnapshot::save(android::base::Stream* stream) { mImpl->save(stream
 void VkDecoderSnapshot::load(android::base::Stream* stream, GfxApiLogger& gfx_logger,
                              HealthMonitor<>* healthMonitor) {
     mImpl->load(stream, gfx_logger, healthMonitor);
+}
+
+void VkDecoderSnapshot::createExtraHandlesForNextApi(const uint64_t* created, uint32_t count) {
+    mImpl->createExtraHandlesForNextApi(created, count);
 }
 
 VkDecoderSnapshot::~VkDecoderSnapshot() = default;
