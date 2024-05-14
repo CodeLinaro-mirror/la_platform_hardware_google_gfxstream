@@ -20,6 +20,7 @@
 
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -150,13 +151,22 @@ using VkExpected = android::base::expected<VkType, vkhpp::Result>;
     std::move(vkhpp_result_value.value);                                      \
   })
 
-#define VK_TRY(x)                                                             \
-  ({                                                                          \
-    auto vkhpp_result = (x);                                                  \
-    if (vkhpp_result != vkhpp::Result::eSuccess) {                            \
-        return vkhpp_result;                                                  \
-    }                                                                         \
-  })
+#define VK_TRY(x)                                                                   \
+    ({                                                                              \
+        auto vk_try_android_base_expected = (x);                                    \
+        if (!vk_try_android_base_expected.ok()) {                                   \
+            return android::base::unexpected(vk_try_android_base_expected.error()); \
+        }                                                                           \
+        std::move(vk_try_android_base_expected.value());                            \
+    })
+
+#define VK_TRY_RESULT(x)                               \
+    ({                                                 \
+        auto vkhpp_result = (x);                       \
+        if (vkhpp_result != vkhpp::Result::eSuccess) { \
+            return vkhpp_result;                       \
+        }                                              \
+    })
 
 #define VK_TRY_RV(x)                                                          \
   ({                                                                          \
@@ -441,6 +451,7 @@ enum class GfxstreamTransport {
 struct TestParams {
     bool with_gl;
     bool with_vk;
+    int samples = 1;
     std::unordered_set<std::string> with_features;
     GfxstreamTransport with_transport = GfxstreamTransport::kVirtioGpuAsg;
 
@@ -453,6 +464,13 @@ std::string GetTestName(const ::testing::TestParamInfo<TestParams>& info);
 // Generates the cartesian product of params with and without the given features.
 std::vector<TestParams> WithAndWithoutFeatures(const std::vector<TestParams>& params,
                                                const std::vector<std::string>& features);
+
+struct TypicalVkTestEnvironmentOptions {
+    uint32_t apiVersion{VK_API_VERSION_1_2};
+    std::optional<const void*> instanceCreateInfoPNext;
+    std::optional<std::vector<std::string>> deviceExtensions;
+    std::optional<const void*> deviceCreateInfoPNext;
+};
 
 class GfxstreamEnd2EndTest : public ::testing::TestWithParam<TestParams> {
    public:
@@ -493,7 +511,7 @@ class GfxstreamEnd2EndTest : public ::testing::TestWithParam<TestParams> {
         uint32_t queueFamilyIndex;
     };
     VkExpected<TypicalVkTestEnvironment> SetUpTypicalVkTestEnvironment(
-        uint32_t apiVersion = VK_API_VERSION_1_2);
+        const TypicalVkTestEnvironmentOptions& opts = {});
 
     uint32_t GetMemoryType(const vkhpp::PhysicalDevice& physicalDevice,
                            const vkhpp::MemoryRequirements& memoryRequirements,
