@@ -270,7 +270,24 @@ class VkDecoderSnapshot::Impl {
     }
     void vkBindBufferMemory(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                             android::base::BumpPool* pool, VkResult input_result, VkDevice device,
-                            VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset) {}
+                            VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset) {
+        VkBuffer boxed_VkBuffer = unboxed_to_boxed_non_dispatchable_VkBuffer((&buffer)[0]);
+        android::base::AutoLock lock(mLock);
+        // buffer create
+        mReconstruction.addHandleDependency(
+            (const uint64_t*)&boxed_VkBuffer, 1,
+            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkDeviceMemory(memory),
+            VkReconstruction::BOUND_MEMORY);
+        mReconstruction.addHandleDependency((const uint64_t*)&boxed_VkBuffer, 1,
+                                            (uint64_t)(uintptr_t)((&boxed_VkBuffer)[0]),
+                                            VkReconstruction::BOUND_MEMORY);
+        auto apiHandle = mReconstruction.createApiInfo();
+        auto apiInfo = mReconstruction.getApiInfo(apiHandle);
+        mReconstruction.setApiTrace(apiInfo, OP_vkBindBufferMemory, snapshotTraceBegin,
+                                    snapshotTraceBytes);
+        mReconstruction.forEachHandleAddApi((const uint64_t*)&boxed_VkBuffer, 1, apiHandle,
+                                            VkReconstruction::BOUND_MEMORY);
+    }
     void vkBindImageMemory(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                            android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                            VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset) {
@@ -279,8 +296,7 @@ class VkDecoderSnapshot::Impl {
         // image create
         mReconstruction.addHandleDependency(
             (const uint64_t*)&boxed_VkImage, 1,
-            (uint64_t)(uintptr_t)(uint64_t)(uintptr_t)
-                unboxed_to_boxed_non_dispatchable_VkDeviceMemory(memory),
+            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkDeviceMemory(memory),
             VkReconstruction::BOUND_MEMORY);
         mReconstruction.addHandleDependency((const uint64_t*)&boxed_VkImage, 1,
                                             (uint64_t)(uintptr_t)((&boxed_VkImage)[0]),
@@ -1983,6 +1999,8 @@ class VkDecoderSnapshot::Impl {
 #endif
 #ifdef VK_EXT_swapchain_colorspace
 #endif
+#ifdef VK_MVK_moltenvk
+#endif
 #ifdef VK_EXT_queue_family_foreign
 #endif
 #ifdef VK_EXT_debug_utils
@@ -2181,6 +2199,8 @@ class VkDecoderSnapshot::Impl {
                              VkPrivateDataSlot privateDataSlot, uint64_t* pData) {}
 #endif
 #ifdef VK_EXT_pipeline_creation_cache_control
+#endif
+#ifdef VK_EXT_metal_objects
 #endif
 #ifdef VK_EXT_graphics_pipeline_library
 #endif

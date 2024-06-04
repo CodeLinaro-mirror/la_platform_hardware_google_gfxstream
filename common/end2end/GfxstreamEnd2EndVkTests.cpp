@@ -17,6 +17,7 @@
 #include <atomic>
 #include <thread>
 
+#include "GfxstreamEnd2EndTestUtils.h"
 #include "GfxstreamEnd2EndTests.h"
 
 namespace gfxstream {
@@ -85,7 +86,7 @@ class GfxstreamEnd2EndVkTest : public GfxstreamEnd2EndTest {
         vkhpp::MemoryRequirements imageMemoryRequirements{};
         device->getImageMemoryRequirements(*image, &imageMemoryRequirements);
 
-        const uint32_t imageMemoryIndex = GetMemoryType(
+        const uint32_t imageMemoryIndex = utils::getMemoryType(
             physicalDevice, imageMemoryRequirements, vkhpp::MemoryPropertyFlagBits::eDeviceLocal);
         ASSERT_THAT(imageMemoryIndex, Not(Eq(-1)));
 
@@ -165,8 +166,8 @@ TEST_P(GfxstreamEnd2EndVkTest, ImportAHB) {
     vkhpp::MemoryRequirements imageMemoryRequirements{};
     device->getImageMemoryRequirements(*image, &imageMemoryRequirements);
 
-    const uint32_t imageMemoryIndex =
-        GetMemoryType(physicalDevice, imageMemoryRequirements, vkhpp::MemoryPropertyFlagBits::eDeviceLocal);
+    const uint32_t imageMemoryIndex = utils::getMemoryType(
+        physicalDevice, imageMemoryRequirements, vkhpp::MemoryPropertyFlagBits::eDeviceLocal);
     ASSERT_THAT(imageMemoryIndex, Not(Eq(-1)));
 
     const vkhpp::MemoryAllocateInfo imageMemoryAllocateInfo = {
@@ -190,11 +191,9 @@ TEST_P(GfxstreamEnd2EndVkTest, ImportAHB) {
     vkhpp::MemoryRequirements stagingBufferMemoryRequirements{};
     device->getBufferMemoryRequirements(*stagingBuffer, &stagingBufferMemoryRequirements);
 
-    const auto stagingBufferMemoryType =
-         GetMemoryType(physicalDevice,
-                       stagingBufferMemoryRequirements,
-                       vkhpp::MemoryPropertyFlagBits::eHostVisible |
-                       vkhpp::MemoryPropertyFlagBits::eHostCoherent);
+    const auto stagingBufferMemoryType = utils::getMemoryType(
+        physicalDevice, stagingBufferMemoryRequirements,
+        vkhpp::MemoryPropertyFlagBits::eHostVisible | vkhpp::MemoryPropertyFlagBits::eHostCoherent);
 
     const vkhpp::MemoryAllocateInfo stagingBufferMemoryAllocateInfo = {
         .allocationSize = stagingBufferMemoryRequirements.size,
@@ -368,8 +367,8 @@ TEST_P(GfxstreamEnd2EndVkTest, BlobAHBIsNotMapable) {
                     Ne(vkhpp::MemoryPropertyFlagBits::eHostVisible));
     }
 
-    const auto bufferMemoryType = GetMemoryType(physicalDevice, bufferMemoryRequirements,
-                                                vkhpp::MemoryPropertyFlagBits::eDeviceLocal);
+    const auto bufferMemoryType = utils::getMemoryType(physicalDevice, bufferMemoryRequirements,
+                                                       vkhpp::MemoryPropertyFlagBits::eDeviceLocal);
     ASSERT_THAT(bufferMemoryType, Ne(-1));
 
     const vkhpp::ImportAndroidHardwareBufferInfoANDROID importHardwareBufferInfo = {
@@ -867,6 +866,146 @@ TEST_P(GfxstreamEnd2EndVkTest, DescriptorUpdateTemplateWithWrapping) {
 
     device->updateDescriptorSetWithTemplate(*descriptorSet, *descriptorUpdateTemplate,
                                             descriptorInfo.data());
+}
+
+TEST_P(GfxstreamEnd2EndVkTest, MultiThreadedVkMapMemory) {
+    auto [instance, physicalDevice, device, queue, queueFamilyIndex] =
+        VK_ASSERT(SetUpTypicalVkTestEnvironment());
+
+    static constexpr const vkhpp::DeviceSize kSize = 1024;
+    const vkhpp::BufferCreateInfo bufferCreateInfo = {
+        .size = kSize,
+        .usage = vkhpp::BufferUsageFlagBits::eTransferSrc,
+    };
+    auto buffer = device->createBufferUnique(bufferCreateInfo).value;
+
+    vkhpp::MemoryRequirements bufferMemoryRequirements{};
+    device->getBufferMemoryRequirements(*buffer, &bufferMemoryRequirements);
+
+    const uint32_t bufferMemoryIndex = utils::getMemoryType(
+        physicalDevice, bufferMemoryRequirements,
+        vkhpp::MemoryPropertyFlagBits::eHostVisible | vkhpp::MemoryPropertyFlagBits::eHostCoherent);
+    if (bufferMemoryIndex == -1) {
+        GTEST_SKIP() << "Skipping test due to no memory type with HOST_VISIBLE | HOST_COHERENT.";
+    }
+
+    std::vector<std::thread> threads;
+    std::atomic_int threadsReady{0};
+
+    constexpr const int kNumThreads = 2;
+    for (int t = 0; t < kNumThreads; t++) {
+        threads.emplace_back([&, this]() {
+            // Perform some work to ensure host RenderThread started.
+            auto buffer2 = device->createBufferUnique(bufferCreateInfo).value;
+            ASSERT_THAT(buffer2, IsValidHandle());
+
+            ++threadsReady;
+            while (threadsReady.load() != kNumThreads) {
+            }
+
+            constexpr const int kNumIterations = 100;
+            for (int i = 0; i < kNumIterations; i++) {
+                auto buffer3 = device->createBufferUnique(bufferCreateInfo).value;
+                ASSERT_THAT(buffer3, IsValidHandle());
+
+                const vkhpp::MemoryAllocateInfo buffer3MemoryAllocateInfo = {
+                    .allocationSize = bufferMemoryRequirements.size,
+                    .memoryTypeIndex = bufferMemoryIndex,
+                };
+                auto buffer3Memory = device->allocateMemoryUnique(buffer3MemoryAllocateInfo).value;
+                ASSERT_THAT(buffer3Memory, IsValidHandle());
+
+                ASSERT_THAT(device->bindBufferMemory(*buffer3, *buffer3Memory, 0), IsVkSuccess());
+
+                void* mapped = nullptr;
+                ASSERT_THAT(device->mapMemory(*buffer3Memory, 0, VK_WHOLE_SIZE,
+                                              vkhpp::MemoryMapFlags{}, &mapped),
+                            IsVkSuccess());
+                ASSERT_THAT(mapped, NotNull());
+
+                device->unmapMemory(*buffer3Memory);
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+}
+
+TEST_P(GfxstreamEnd2EndVkTest, MultiThreadedResetCommandBuffer) {
+    auto [instance, physicalDevice, device, queue, queueFamilyIndex] =
+        VK_ASSERT(SetUpTypicalVkTestEnvironment());
+
+    static constexpr const vkhpp::DeviceSize kSize = 1024;
+    const vkhpp::BufferCreateInfo bufferCreateInfo = {
+        .size = kSize,
+        .usage = vkhpp::BufferUsageFlagBits::eTransferSrc,
+    };
+
+    static std::mutex queue_mutex;
+    std::vector<std::thread> threads;
+    std::atomic_int threadsReady{0};
+
+    constexpr const int kNumThreads = 10;
+    for (int t = 0; t < kNumThreads; t++) {
+        threads.emplace_back([&, this]() {
+            // Perform some work to ensure host RenderThread started.
+            auto buffer2 = device->createBufferUnique(bufferCreateInfo).value;
+            ASSERT_THAT(buffer2, IsValidHandle());
+
+            ++threadsReady;
+            while (threadsReady.load() != kNumThreads) {
+            }
+
+            const vkhpp::CommandPoolCreateInfo commandPoolCreateInfo = {
+                .queueFamilyIndex = queueFamilyIndex,
+            };
+            auto commandPool = device->createCommandPoolUnique(commandPoolCreateInfo).value;
+
+            const vkhpp::CommandBufferAllocateInfo commandBufferAllocateInfo = {
+                .level = vkhpp::CommandBufferLevel::ePrimary,
+                .commandPool = *commandPool,
+                .commandBufferCount = 1,
+            };
+            auto commandBuffers = device->allocateCommandBuffersUnique(commandBufferAllocateInfo).value;
+            ASSERT_THAT(commandBuffers, Not(IsEmpty()));
+            auto commandBuffer = std::move(commandBuffers[0]);
+            ASSERT_THAT(commandBuffer, IsValidHandle());
+
+            auto transferFence = device->createFenceUnique(vkhpp::FenceCreateInfo()).value;
+            ASSERT_THAT(commandBuffer, IsValidHandle());
+
+            constexpr const int kNumIterations = 1000;
+            for (int i = 0; i < kNumIterations; i++) {
+                commandBuffer->reset();
+                const vkhpp::CommandBufferBeginInfo commandBufferBeginInfo = {
+                    .flags = vkhpp::CommandBufferUsageFlagBits::eOneTimeSubmit,
+                };
+                commandBuffer->begin(commandBufferBeginInfo);
+
+                commandBuffer->end();
+
+                std::vector<vkhpp::CommandBuffer> commandBufferHandles;
+                commandBufferHandles.push_back(*commandBuffer);
+
+                const vkhpp::SubmitInfo submitInfo = {
+                    .commandBufferCount = static_cast<uint32_t>(commandBufferHandles.size()),
+                    .pCommandBuffers = commandBufferHandles.data(),
+                };
+                {
+                    std::lock_guard<std::mutex> qm(queue_mutex);
+                    queue.submit(submitInfo, *transferFence);
+                }
+                auto waitResult = device->waitForFences(*transferFence, VK_TRUE, AsVkTimeout(3s));
+                ASSERT_THAT(waitResult, IsVkSuccess());
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
 }
 
 std::vector<TestParams> GenerateTestCases() {
