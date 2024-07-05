@@ -61,7 +61,7 @@ std::vector<VkReconstruction::HandleWithState> typeTagSortedHandles(
 void VkReconstruction::save(android::base::Stream* stream) {
     DEBUG_RECON("start")
 
-#if DEBUG_RECON
+#if DEBUG_RECONSTRUCTION
     dump();
 #endif
 
@@ -497,6 +497,20 @@ void VkReconstruction::forEachHandleAddModifyApi(const uint64_t* toProcess, uint
         if (!item) continue;
 
         item->apiRefs.push_back(apiHandle);
+    }
+}
+
+void VkReconstruction::forEachHandleClearModifyApi(const uint64_t* toProcess, uint32_t count) {
+    if (!toProcess) return;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        mHandleModifications.add(toProcess[i], HandleModification());
+
+        auto item = mHandleModifications.get(toProcess[i]);
+
+        if (!item) continue;
+
+        item->apiRefs.clear();
     }
 }
 

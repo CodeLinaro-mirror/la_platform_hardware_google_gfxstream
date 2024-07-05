@@ -54,10 +54,14 @@ std::shared_ptr<ColorBuffer> ColorBuffer::create(gl::EmulationGl* emulationGl,
                                                  vk::VkEmulation* emulationVk, uint32_t width,
                                                  uint32_t height, GLenum format,
                                                  FrameworkFormat frameworkFormat, HandleType handle,
-                                                 android::base::Stream* stream) {
+                                                 android::base::Stream* stream, bool linear) {
     std::shared_ptr<ColorBuffer> colorBuffer(
         new ColorBuffer(handle, width, height, format, frameworkFormat));
 
+    if (stream) {
+        // When vk snapshot enabled, mNeedRestore will be touched and set to false immediately.
+        colorBuffer->mNeedRestore = true;
+    }
 #if GFXSTREAM_ENABLE_HOST_GLES
     if (emulationGl) {
         if (stream) {
@@ -78,10 +82,12 @@ std::shared_ptr<ColorBuffer> ColorBuffer::create(gl::EmulationGl* emulationGl,
 
     if (emulationVk && emulationVk->live) {
         const bool vulkanOnly = colorBuffer->mColorBufferGl == nullptr;
-
-        colorBuffer->mColorBufferVk =
-            vk::ColorBufferVk::create(handle, width, height, format, frameworkFormat, vulkanOnly,
-                                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stream);
+        uint32_t memoryProperty = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        if (vulkanOnly && linear) {
+            memoryProperty |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        }
+        colorBuffer->mColorBufferVk = vk::ColorBufferVk::create(
+            handle, width, height, format, frameworkFormat, vulkanOnly, memoryProperty, stream);
         if (!colorBuffer->mColorBufferVk) {
             if (emulationGl) {
                 // Historically, ColorBufferVk setup was deferred until the first actual Vulkan
@@ -95,9 +101,11 @@ std::shared_ptr<ColorBuffer> ColorBuffer::create(gl::EmulationGl* emulationGl,
 
 #if GFXSTREAM_ENABLE_HOST_GLES
     bool b271028352Workaround = emulationGl && strstr(emulationGl->getGlesRenderer().c_str(), "Intel");
+    bool vkSnapshotEnabled = emulationVk && emulationVk->features.VulkanSnapshots.enabled;
 
-    if (!stream && colorBuffer->mColorBufferGl && colorBuffer->mColorBufferVk &&
+    if ((!stream || vkSnapshotEnabled) && colorBuffer->mColorBufferGl && colorBuffer->mColorBufferVk &&
         !b271028352Workaround && shouldAttemptExternalMemorySharing(frameworkFormat)) {
+        colorBuffer->touch();
         auto memoryExport = vk::exportColorBufferMemory(handle);
         if (memoryExport) {
             if (colorBuffer->mColorBufferGl->importMemory(
@@ -126,8 +134,6 @@ std::shared_ptr<ColorBuffer> ColorBuffer::onLoad(gl::EmulationGl* emulationGl,
 
     std::shared_ptr<ColorBuffer> colorBuffer = ColorBuffer::create(
         emulationGl, emulationVk, width, height, format, frameworkFormat, handle, stream);
-
-    colorBuffer->mNeedRestore = true;
 
     return colorBuffer;
 }

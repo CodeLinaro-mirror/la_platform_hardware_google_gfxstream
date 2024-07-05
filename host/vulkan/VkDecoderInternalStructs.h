@@ -228,9 +228,11 @@ struct QueueInfo {
 
 struct BufferInfo {
     VkDevice device;
+    VkBufferUsageFlags usage;
     VkDeviceMemory memory = 0;
     VkDeviceSize memoryOffset = 0;
     VkDeviceSize size;
+    std::shared_ptr<bool> alive{new bool(true)};
 };
 
 struct ImageInfo {
@@ -251,6 +253,7 @@ struct ImageViewInfo {
 
     // Color buffer, provided via vkAllocateMemory().
     std::optional<HandleType> boundColorBuffer;
+    std::shared_ptr<bool> alive{new bool(true)};
 };
 
 struct SamplerInfo {
@@ -271,6 +274,7 @@ struct SamplerInfo {
     SamplerInfo(const SamplerInfo& other) { *this = other; }
     SamplerInfo(SamplerInfo&& other) = delete;
     SamplerInfo& operator=(SamplerInfo&& other) = delete;
+    std::shared_ptr<bool> alive{new bool(true)};
 };
 
 struct FenceInfo {
@@ -331,7 +335,36 @@ struct DescriptorPoolInfo {
 };
 
 struct DescriptorSetInfo {
+    enum DescriptorWriteType {
+        Empty = 0,
+        ImageInfo = 1,
+        BufferInfo = 2,
+        BufferView = 3,
+        InlineUniformBlock = 4,
+        AccelerationStructure = 5,
+    };
+
+    struct DescriptorWrite {
+        VkDescriptorType descriptorType;
+        DescriptorWriteType writeType = DescriptorWriteType::Empty;
+        uint32_t dstArrayElement;  // Only used for inlineUniformBlock and accelerationStructure.
+
+        union {
+            VkDescriptorImageInfo imageInfo;
+            VkDescriptorBufferInfo bufferInfo;
+            VkBufferView bufferView;
+            VkWriteDescriptorSetInlineUniformBlockEXT inlineUniformBlock;
+            VkWriteDescriptorSetAccelerationStructureKHR accelerationStructure;
+        };
+
+        std::vector<uint8_t> inlineUniformBlockBuffer;
+        // Weak pointer(s) to detect if all objects on dependency chain are alive.
+        std::vector<std::weak_ptr<bool>> alives;
+    };
+
     VkDescriptorPool pool;
+    VkDescriptorSetLayout unboxedLayout = 0;
+    std::vector<std::vector<DescriptorWrite>> allWrites;
     std::vector<VkDescriptorSetLayoutBinding> bindings;
 };
 
