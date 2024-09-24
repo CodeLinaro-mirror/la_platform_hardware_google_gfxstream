@@ -36,12 +36,6 @@ struct gl_client_context_t;
 class GL2Encoder;
 struct gl2_client_context_t;
 
-namespace gfxstream {
-namespace vk {
-class VkEncoder;
-}  // namespace vk
-}  // namespace gfxstream
-
 struct EGLThreadInfo;
 
 enum HostConnectionType {
@@ -66,7 +60,6 @@ public:
 
     GLEncoder *glEncoder();
     GL2Encoder *gl2Encoder();
-    gfxstream::vk::VkEncoder *vkEncoder();
     ExtendedRCEncoderContext *rcEncoder();
 
 #if defined(ANDROID)
@@ -102,40 +95,6 @@ public:
  static gl_client_context_t* s_getGLContext();
  static gl2_client_context_t* s_getGL2Context();
 
- const std::string& queryHostExtensions(ExtendedRCEncoderContext* rcEnc);
- // setProtocol initializes GL communication protocol for checksums
- // should be called when m_rcEnc is created
- void setChecksumHelper(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetSyncImpl(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetDmaImpl(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetGLESMaxVersion(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetNoErrorState(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetHostCompositionImpl(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetDirectMemSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetDeferredVulkanCommandsSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanNullOptionalStringsSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanCreateResourcesWithRequirementsSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanIgnoredHandles(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetYUVCache(ExtendedRCEncoderContext* mrcEnc);
- void queryAndSetAsyncUnmapBuffer(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVirtioGpuNext(ExtendedRCEncoderContext* rcEnc);
- void queryHasSharedSlotsHostMemoryAllocator(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanFreeMemorySync(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVirtioGpuNativeSync(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanShaderFloat16Int8Support(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanAsyncQueueSubmitSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetHostSideTracingSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetAsyncFrameCommands(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanQueueSubmitWithCommandsSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanBatchedDescriptorSetUpdateSupport(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetSyncBufferData(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanAsyncQsri(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetReadColorBufferDma(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetHWCMultiConfigs(ExtendedRCEncoderContext* rcEnc);
- void queryAndSetVulkanAuxCommandBufferMemory(ExtendedRCEncoderContext* rcEnc);
- GLint queryVersion(ExtendedRCEncoderContext* rcEnc);
-
 private:
  HostConnectionType m_connectionType;
 
@@ -146,7 +105,6 @@ private:
  std::unique_ptr<GL2Encoder> m_gl2Enc;
 
  // intrusively refcounted
- gfxstream::vk::VkEncoder* m_vkEnc = nullptr;
  std::unique_ptr<ExtendedRCEncoderContext> m_rcEnc;
 
  gfxstream::guest::ChecksumCalculator m_checksumHelper;
@@ -155,7 +113,6 @@ private:
  std::unique_ptr<gfxstream::Gralloc> m_grallocHelper;
 #endif
  std::unique_ptr<gfxstream::SyncHelper> m_syncHelper;
- std::string m_hostExtensions;
  bool m_noHostError;
  mutable std::mutex m_lock;
  int m_rendernodeFd;
