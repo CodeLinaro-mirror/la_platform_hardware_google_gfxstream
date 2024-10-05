@@ -1,17 +1,7 @@
-// Copyright (C) 2018 The Android Open Source Project
-// Copyright (C) 2018 Google Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Copyright 2018 Google
+ * SPDX-License-Identifier: MIT
+ */
 #pragma once
 
 #include <vulkan/vulkan.h>
@@ -80,7 +70,7 @@ typedef uint64_t zx_koid_t;
 /// Use installed headers or locally defined Android-specific bits
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
 #include "AndroidHardwareBuffer.h"
-#include "gfxstream/guest/Gralloc.h"
+#include "gfxstream/guest/GfxStreamGralloc.h"
 #include <android/hardware_buffer.h>
 #endif
 
@@ -386,6 +376,9 @@ class ResourceTracker {
 
     VkResult on_vkGetFenceFdKHR(void* context, VkResult input_result, VkDevice device,
                                 const VkFenceGetFdInfoKHR* pGetFdInfo, int* pFd);
+
+    VkResult on_vkGetFenceStatus(void* context, VkResult input_result, VkDevice device,
+                                 VkFence fence);
 
     VkResult on_vkWaitForFences(void* context, VkResult input_result, VkDevice device,
                                 uint32_t fenceCount, const VkFence* pFences, VkBool32 waitAll,
@@ -850,7 +843,8 @@ class ResourceTracker {
         bool external = false;
         VkExportFenceCreateInfo exportFenceCreateInfo;
 #if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(__linux__)
-        int syncFd = -1;
+        // Note: -1 means already signaled.
+        std::optional<int> syncFd;
 #endif
     };
 
