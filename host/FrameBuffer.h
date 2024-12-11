@@ -41,7 +41,6 @@
 #include "aemu/base/AsyncResult.h"
 #include "aemu/base/EventNotificationSupport.h"
 #include "aemu/base/HealthMonitor.h"
-#include "aemu/base/ManagedDescriptor.hpp"
 #include "aemu/base/Metrics.h"
 #include "aemu/base/files/Stream.h"
 #include "aemu/base/synchronization/Lock.h"
@@ -509,9 +508,9 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
     void scheduleVsyncTask(VsyncThread::VsyncTask task);
     void setDisplayConfigs(int configId, int w, int h, int dpiX, int dpiY);
     void setDisplayActiveConfig(int configId);
-    const int getDisplayConfigsCount();
-    const int getDisplayConfigsParam(int configId, EGLint param);
-    const int getDisplayActiveConfig();
+    int getDisplayConfigsCount();
+    int getDisplayConfigsParam(int configId, EGLint param);
+    int getDisplayActiveConfig();
 
     bool flushColorBufferFromVk(HandleType colorBufferHandle);
     bool flushColorBufferFromVkBytes(HandleType colorBufferHandle, const void* bytes,
