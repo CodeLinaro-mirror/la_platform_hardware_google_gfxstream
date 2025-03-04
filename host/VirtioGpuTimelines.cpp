@@ -318,9 +318,6 @@ std::unique_ptr<VirtioGpuTimelines> VirtioGpuTimelines::Restore(
     FenceCompletionCallback callback,
     const gfxstream::host::snapshot::VirtioGpuTimelinesSnapshot& snapshot) {
     std::unique_ptr<VirtioGpuTimelines> timelines(new VirtioGpuTimelines(std::move(callback)));
-
-    std::lock_guard<std::mutex> lock(timelines->mTimelinesMutex);
-
     timelines->mNextId.store(snapshot.next_id());
 
     for (const auto& timelineSnapshot : snapshot.timelines()) {

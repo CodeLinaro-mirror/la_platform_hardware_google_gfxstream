@@ -167,44 +167,7 @@ VkResult prepareAndroidNativeBufferImage(VulkanDispatch* vk, VkDevice device,
         }
         vk_struct_chain_remove(nativeBufferAndroid, &createImageCi);
 
-        const uint32_t importedColorBufferHandle =
-            *static_cast<const uint32_t*>(nativeBufferANDROID->handle);
-        if (importedColorBufferHandle == 0) {
-            VK_ANB_ERR(
-                "Failed to prepare ANB image: attempted to import a non-existent ColorBuffer.");
-            return VK_ERROR_INITIALIZATION_FAILED;
-        }
-        const auto importedColorBufferInfoOpt = getColorBufferInfo(importedColorBufferHandle);
-        if (!importedColorBufferInfoOpt) {
-            VK_ANB_ERR("Failed to prepare ANB image: ColorBuffer:%d info not found.",
-                       importedColorBufferHandle);
-            return VK_ERROR_INITIALIZATION_FAILED;
-        }
-        const auto& importedColorBufferInfo = *importedColorBufferInfoOpt;
-        if (pCreateInfo == nullptr) {
-            VK_ANB_ERR("Failed to prepare ANB image: invalid pCreateInfo.");
-            return VK_ERROR_INITIALIZATION_FAILED;
-        }
-        if (pCreateInfo->extent.width > importedColorBufferInfo.width) {
-            VK_ANB_ERR(
-                "Failed to prepare ANB image: attempted to create a VkImage with width:%d by "
-                "importing ColorBuffer:%d which only has width:%d",
-                pCreateInfo->extent.width, importedColorBufferHandle,
-                importedColorBufferInfo.width);
-            return VK_ERROR_INITIALIZATION_FAILED;
-        }
-        if (pCreateInfo->extent.height > importedColorBufferInfo.height) {
-            VK_ANB_ERR(
-                "Failed to prepare ANB image: attempted to create a VkImage with height:%d by "
-                "importing ColorBuffer:%d which only has height:%d",
-                pCreateInfo->extent.height, importedColorBufferHandle,
-                importedColorBufferInfo.height);
-            return VK_ERROR_INITIALIZATION_FAILED;
-        }
-        const auto& importedColorBufferMemoryInfo = importedColorBufferInfo.memory;
-
-        // VkBindImageMemorySwapchainInfoKHR may be included from the guest but
-        // should not be passed to the host driver.
+        // VkBindImageMemorySwapchainInfoKHR should also not be passed to image creation
         auto* bindSwapchainInfo = vk_find_struct<VkBindImageMemorySwapchainInfoKHR>(&createImageCi);
         vk_struct_chain_remove(bindSwapchainInfo, &createImageCi);
 
@@ -232,10 +195,14 @@ VkResult prepareAndroidNativeBufferImage(VulkanDispatch* vk, VkDevice device,
 
         if (createResult != VK_SUCCESS) return createResult;
 
+        // Now import the backing memory.
+        const auto& cbInfo = getColorBufferInfo(out->colorBufferHandle);
+        const auto& memInfo = cbInfo.memory;
+
         vk->vkGetImageMemoryRequirements(device, out->image, &out->memReqs);
 
-        if (out->memReqs.size < importedColorBufferMemoryInfo.size) {
-            out->memReqs.size = importedColorBufferMemoryInfo.size;
+        if (out->memReqs.size < memInfo.size) {
+            out->memReqs.size = memInfo.size;
         }
 
         VkMemoryDedicatedAllocateInfo dedicatedInfo = {
@@ -245,19 +212,18 @@ VkResult prepareAndroidNativeBufferImage(VulkanDispatch* vk, VkDevice device,
             VK_NULL_HANDLE,
         };
         VkMemoryDedicatedAllocateInfo* dedicatedInfoPtr = nullptr;
-        if (importedColorBufferMemoryInfo.dedicatedAllocation) {
+        if (memInfo.dedicatedAllocation) {
             dedicatedInfo.image = out->image;
             dedicatedInfoPtr = &dedicatedInfo;
         }
 
-        if (!importExternalMemory(vk, device, &importedColorBufferMemoryInfo, dedicatedInfoPtr,
-                                  &out->imageMemory)) {
+        if (!importExternalMemory(vk, device, &memInfo, dedicatedInfoPtr, &out->imageMemory)) {
             VK_ANB_ERR("VK_ANDROID_native_buffer: Failed to import external memory%s",
-                       importedColorBufferMemoryInfo.dedicatedAllocation ? " (dedicated)" : "");
+                       memInfo.dedicatedAllocation ? " (dedicated)" : "");
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
-        bindOffset = importedColorBufferMemoryInfo.bindOffset;
+        bindOffset = memInfo.bindOffset;
     } else {
         // delete the info struct and pass to vkCreateImage, and also add
         // transfer src capability to allow us to copy to CPU.

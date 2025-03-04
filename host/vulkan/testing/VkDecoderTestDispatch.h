@@ -14,10 +14,9 @@
 
 #pragma once
 
-#include "goldfish_vk_dispatch.h"
 #include "vulkan/VkDecoderGlobalState.h"
+#include "goldfish_vk_dispatch.h"
 #include "vulkan/vulkan.h"
-#include "VulkanBoxedHandles.h"
 
 namespace gfxstream {
 namespace vk {

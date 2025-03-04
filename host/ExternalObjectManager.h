@@ -23,7 +23,6 @@
 
 #include "aemu/base/Compiler.h"
 #include "aemu/base/ManagedDescriptor.hpp"
-#include "aemu/base/ThreadAnnotations.h"
 
 // A global mapping from opaque host memory IDs to host virtual
 // addresses/sizes.  This is so that the guest doesn't have to know the host
@@ -132,16 +131,13 @@ class ExternalObjectManager {
         }
     };
 
-    std::mutex mMutex;
-    std::unordered_map<std::pair<uint32_t, uint64_t>, HostMemInfo, pair_hash> mHostMemInfos
-        GUARDED_BY(mMutex);
+    std::mutex mLock;
+    std::unordered_map<std::pair<uint32_t, uint64_t>, HostMemInfo, pair_hash> mHostMemInfos;
     std::unordered_map<std::pair<uint32_t, uint64_t>, BlobDescriptorInfo, pair_hash>
-        mBlobDescriptorInfos GUARDED_BY(mMutex);
+        mBlobDescriptorInfos;
     std::unordered_map<std::pair<uint32_t, uint64_t>, SyncDescriptorInfo, pair_hash>
-        mSyncDescriptorInfos GUARDED_BY(mMutex);
-    std::unordered_map<uint32_t, ExternalHandleInfo> mResourceExternalHandleInfos
-        GUARDED_BY(mMutex);
-
+        mSyncDescriptorInfos;
+    std::unordered_map<uint32_t, ExternalHandleInfo> mResourceExternalHandleInfos;
     DISALLOW_COPY_ASSIGN_AND_MOVE(ExternalObjectManager);
 };
 

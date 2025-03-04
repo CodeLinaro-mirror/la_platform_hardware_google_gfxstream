@@ -73,7 +73,6 @@ cc_library_static {
         "VkEmulatedPhysicalDeviceQueue.cpp",
         "VkFormatUtils.cpp",
         "VkReconstruction.cpp",
-        "VulkanBoxedHandles.cpp",
         "VulkanDispatch.cpp",
         "VulkanHandleMapping.cpp",
         "VulkanStream.cpp",

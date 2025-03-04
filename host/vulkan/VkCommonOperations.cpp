@@ -674,7 +674,7 @@ int getSelectedGpuIndex(const std::vector<VkEmulation::DeviceSupportInfo>& devic
             }
         }
 
-        if (enforceGpuIndex != -1 && enforceGpuIndex >= 0 && enforceGpuIndex < (int)deviceInfos.size()) {
+        if (enforceGpuIndex != -1 && enforceGpuIndex >= 0 && enforceGpuIndex < deviceInfos.size()) {
             INFO("Selecting GPU (%s) at index %d.",
                  deviceInfos[enforceGpuIndex].physdevProps.deviceName, enforceGpuIndex);
         } else {
@@ -1036,7 +1036,7 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
 
     std::vector<VkEmulation::DeviceSupportInfo> deviceInfos(physdevCount);
 
-    for (uint32_t i = 0; i < physdevCount; ++i) {
+    for (int i = 0; i < physdevCount; ++i) {
         ivk->vkGetPhysicalDeviceProperties(physdevs[i], &deviceInfos[i].physdevProps);
 
         VERBOSE("Considering Vulkan physical device %d : %s", i,
@@ -1761,8 +1761,7 @@ bool allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalMemoryInfo* in
     VkExportMemoryAllocateInfo exportAi = {
         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
         .pNext = nullptr,
-        .handleTypes =
-            static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType()),
+        .handleTypes = getDefaultExternalMemoryHandleType(),
     };
 
     VkMemoryDedicatedAllocateInfo dedicatedAllocInfo = {
@@ -2445,7 +2444,7 @@ static bool createVkColorBufferLocked(uint32_t width, uint32_t height, GLenum in
     VkExternalMemoryImageCreateInfo extImageCi = {
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
         0,
-        static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType()),
+        getDefaultExternalMemoryHandleType(),
     };
 #if defined(__APPLE__)
     if (sVkEmulation->instanceSupportsMoltenVK) {
@@ -2586,10 +2585,6 @@ static bool createVkColorBufferLocked(uint32_t width, uint32_t height, GLenum in
                                               nullptr, VK_NULL_HANDLE};
     const bool addConversion = formatRequiresYcbcrConversion(imageVkFormat);
     if (addConversion) {
-        if (!sVkEmulation->deviceInfo.supportsSamplerYcbcrConversion) {
-            ERR("VkFormat: %d requires conversion, but device does not have required extension for conversion (%s)", imageVkFormat, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
-            return false;
-        }
         VkSamplerYcbcrConversionCreateInfo ycbcrCreateInfo = {
             VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
             nullptr,
@@ -2763,9 +2758,7 @@ bool teardownVkColorBufferLocked(uint32_t colorBufferHandle) {
             VK_CHECK(vk->vkQueueWaitIdle(sVkEmulation->queue));
         }
         vk->vkDestroyImageView(sVkEmulation->device, info.imageView, nullptr);
-        if (sVkEmulation->deviceInfo.hasSamplerYcbcrConversionExtension) {
-            vk->vkDestroySamplerYcbcrConversion(sVkEmulation->device, info.ycbcrConversion, nullptr);
-        }
+        vk->vkDestroySamplerYcbcrConversion(sVkEmulation->device, info.ycbcrConversion, nullptr);
         vk->vkDestroyImage(sVkEmulation->device, info.image, nullptr);
         freeExternalMemoryLocked(vk, &info.memory);
     }
@@ -2782,15 +2775,17 @@ bool teardownVkColorBuffer(uint32_t colorBufferHandle) {
     return teardownVkColorBufferLocked(colorBufferHandle);
 }
 
-std::optional<VkEmulation::ColorBufferInfo> getColorBufferInfo(uint32_t colorBufferHandle) {
+VkEmulation::ColorBufferInfo getColorBufferInfo(uint32_t colorBufferHandle) {
+    VkEmulation::ColorBufferInfo res;
+
     AutoLock lock(sVkEmulationLock);
 
     auto infoPtr = android::base::find(sVkEmulation->colorBuffers, colorBufferHandle);
-    if (!infoPtr) {
-        return std::nullopt;
-    }
 
-    return *infoPtr;
+    if (!infoPtr) return res;
+
+    res = *infoPtr;
+    return res;
 }
 
 bool colorBufferNeedsUpdateBetweenGlAndVk(const VkEmulation::ColorBufferInfo& colorBufferInfo) {
@@ -3190,7 +3185,8 @@ static bool updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, uint32_
     sVkEmulation->debugUtilsHelper.cmdBeginDebugLabel(
         commandBuffer, "updateColorBufferFromBytes(ColorBuffer:%d)", colorBufferHandle);
 
-    const bool isSnapshotLoad = VkDecoderGlobalState::get()->isSnapshotCurrentlyLoading();
+    bool isSnapshotLoad =
+        VkDecoderGlobalState::get()->getSnapshotState() == VkDecoderGlobalState::Loading;
     VkImageLayout currentLayout = colorBufferInfo->currentLayout;
     if (isSnapshotLoad) {
         currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -3476,7 +3472,7 @@ bool setupVkBuffer(uint64_t size, uint32_t bufferHandle, bool vulkanOnly, uint32
     VkExternalMemoryBufferCreateInfo extBufferCi = {
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
         0,
-        static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType()),
+        getDefaultExternalMemoryHandleType(),
     };
 
     void* extBufferCiPtr = nullptr;

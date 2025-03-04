@@ -25,7 +25,6 @@
 #include <variant>
 
 #include "VulkanDispatch.h"
-#include "aemu/base/ThreadAnnotations.h"
 
 namespace gfxstream {
 namespace vk {
@@ -83,7 +82,7 @@ class DeviceOpTracker {
         std::chrono::time_point<std::chrono::system_clock> timepoint;
     };
     std::mutex mPollFunctionsMutex;
-    std::deque<PollFunction> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
+    std::deque<PollFunction> mPollFunctions;
 
     struct PendingGarbage {
         DeviceOpWaitable waitable;
@@ -91,7 +90,7 @@ class DeviceOpTracker {
         std::chrono::time_point<std::chrono::system_clock> timepoint;
     };
     std::mutex mPendingGarbageMutex;
-    std::deque<PendingGarbage> mPendingGarbage GUARDED_BY(mPendingGarbageMutex);
+    std::deque<PendingGarbage> mPendingGarbage;
 };
 
 class DeviceOpBuilder {

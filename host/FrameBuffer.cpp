@@ -171,7 +171,7 @@ struct InitializedGlobals {
 };
 
 bool postOnlyOnMainThread() {
-#if defined(__APPLE__) && !defined(QEMU_NEXT)
+#ifdef __APPLE__
     return true;
 #else
     return false;
@@ -2113,7 +2113,7 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsi
     int needed =
         useSnipping ? (nChannels * rect.size.w * rect.size.h) : (nChannels * (*width) * (*height));
 
-    if (*cPixels < (size_t)needed) {
+    if (*cPixels < needed) {
         *cPixels = needed;
         return -2;
     }
@@ -2126,7 +2126,7 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsi
     // Transform the x, y coordinates given the rotation.
     // Assume (0, 0) represents the top left corner of the screen.
     if (useSnipping) {
-        int x = 0, y = 0;
+        int x, y;
         switch (desiredRotation) {
             case SKIN_ROTATION_0:
                 x = rect.pos.x;
@@ -2784,7 +2784,7 @@ int FrameBuffer::setDisplayPose(uint32_t displayId, int32_t x, int32_t y, uint32
 }
 
 void FrameBuffer::sweepColorBuffersLocked() {
-    HandleType handleToDestroy = 0;
+    HandleType handleToDestroy;
     while (mOutstandingColorBufferDestroys.tryReceive(&handleToDestroy)) {
         decColorBufferRefCountLocked(handleToDestroy);
     }

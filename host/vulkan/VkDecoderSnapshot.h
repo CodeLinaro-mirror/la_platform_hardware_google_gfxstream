@@ -59,10 +59,9 @@ class VkDecoderSnapshot {
 
     void clear();
 
-    void saveReplayBuffers(android::base::Stream* stream);
-    static void loadReplayBuffers(android::base::Stream* stream,
-                                  std::vector<uint64_t>* outHandleBuffer,
-                                  std::vector<uint8_t>* outDecoderBuffer);
+    void saveDecoderReplayBuffer(android::base::Stream* stream);
+    static void loadDecoderReplayBuffer(android::base::Stream* stream,
+                                        std::vector<uint8_t>* outBuffer);
 
     VkSnapshotApiCallInfo* createApiCallInfo();
     void destroyApiCallInfoIfUnused(VkSnapshotApiCallInfo* info);

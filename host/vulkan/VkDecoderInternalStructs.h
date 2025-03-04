@@ -112,7 +112,7 @@ class ExternalFencePool {
     VkDevice mDevice;
     android::base::Lock mLock;
     std::vector<VkFence> mPool;
-    size_t mMaxSize;
+    int mMaxSize;
 };
 
 class PrivateMemory {

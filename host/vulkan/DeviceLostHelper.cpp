@@ -55,7 +55,7 @@ void DeviceLostHelper::addNeededDeviceExtensions(std::vector<const char*>* devic
     }
 }
 
-void DeviceLostHelper::onDeviceCreated(const DeviceWithQueues& deviceInfo) {
+void DeviceLostHelper::onDeviceCreated(DeviceWithQueues deviceInfo) {
     if (!mEnabled) {
         return;
     }

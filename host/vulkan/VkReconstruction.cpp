@@ -71,7 +71,7 @@ void VkReconstruction::clear() {
     mHandleReconstructions.clear();
 }
 
-void VkReconstruction::saveReplayBuffers(android::base::Stream* stream) {
+void VkReconstruction::saveDecoderReplayBuffer(android::base::Stream* stream) {
     DEBUG_RECON("start")
 
 #if DEBUG_RECONSTRUCTION
@@ -176,18 +176,38 @@ void VkReconstruction::saveReplayBuffers(android::base::Stream* stream) {
     DEBUG_RECON("created handle buffer size: %zu trace: %zu", createdHandleBuffer.size(),
                 apiTraceBuffer.size());
 
-    android::base::saveBuffer(stream, createdHandleBuffer);
-    android::base::saveBuffer(stream, apiTraceBuffer);
+    android::base::saveBufferRaw(stream, (char*)(createdHandleBuffer.data()),
+                                 createdHandleBuffer.size() * sizeof(uint64_t));
+    android::base::saveBufferRaw(stream, (char*)(apiTraceBuffer.data()), apiTraceBuffer.size());
 }
 
 /*static*/
-void VkReconstruction::loadReplayBuffers(android::base::Stream* stream,
-                                         std::vector<uint64_t>* outHandleBuffer,
-                                         std::vector<uint8_t>* outDecoderBuffer) {
+void VkReconstruction::loadDecoderReplayBuffer(android::base::Stream* stream,
+                                               std::vector<uint8_t>* outBuffer) {
     DEBUG_RECON("starting to unpack decoder replay buffer");
 
-    android::base::loadBuffer(stream, outHandleBuffer);
-    android::base::loadBuffer(stream, outDecoderBuffer);
+    std::vector<uint8_t> createdHandleBuffer;
+    std::vector<uint8_t> apiTraceBuffer;
+
+    android::base::loadBuffer(stream, &createdHandleBuffer);
+    android::base::loadBuffer(stream, &apiTraceBuffer);
+
+    DEBUG_RECON("created handle buffer size: %zu trace: %zu", createdHandleBuffer.size(),
+                apiTraceBuffer.size());
+
+    outBuffer->resize(4 + createdHandleBuffer.size() + apiTraceBuffer.size());
+
+    uint8_t* outBufferData = outBuffer->data();
+
+    const uint32_t createdHandleBufferSize = createdHandleBuffer.size();
+    memcpy(outBufferData, &createdHandleBufferSize, sizeof(uint32_t));
+    outBufferData += sizeof(uint32_t);
+
+    memcpy(outBufferData, createdHandleBuffer.data(), createdHandleBufferSize);
+    outBufferData += createdHandleBufferSize;
+
+    memcpy(outBufferData, apiTraceBuffer.data(), apiTraceBuffer.size());
+    outBufferData += apiTraceBuffer.size();
 
     DEBUG_RECON("finished unpacking decoder replay buffer");
 }
