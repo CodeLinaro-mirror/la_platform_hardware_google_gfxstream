@@ -674,7 +674,7 @@ int getSelectedGpuIndex(const std::vector<VkEmulation::DeviceSupportInfo>& devic
             }
         }
 
-        if (enforceGpuIndex != -1 && enforceGpuIndex >= 0 && enforceGpuIndex < deviceInfos.size()) {
+        if (enforceGpuIndex != -1 && enforceGpuIndex >= 0 && enforceGpuIndex < (int)deviceInfos.size()) {
             INFO("Selecting GPU (%s) at index %d.",
                  deviceInfos[enforceGpuIndex].physdevProps.deviceName, enforceGpuIndex);
         } else {
@@ -927,7 +927,6 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
             VK_VERSION_PATCH(appInfo.apiVersion));
 
     VkResult res = gvk->vkCreateInstance(&instCi, nullptr, &sVkEmulation->instance);
-
     if (res != VK_SUCCESS) {
         VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(res, "Failed to create Vulkan instance. Error %s.",
                                              string_VkResult(res));
@@ -959,8 +958,7 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
 
             gvk->vkDestroyInstance(sVkEmulation->instance, nullptr);
 
-            VkResult res = gvk->vkCreateInstance(&instCi, nullptr, &sVkEmulation->instance);
-
+            res = gvk->vkCreateInstance(&instCi, nullptr, &sVkEmulation->instance);
             if (res != VK_SUCCESS) {
                 VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(
                     res, "Failed to create Vulkan 1.1 instance. Error %s.", string_VkResult(res));
@@ -1036,7 +1034,7 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
 
     std::vector<VkEmulation::DeviceSupportInfo> deviceInfos(physdevCount);
 
-    for (int i = 0; i < physdevCount; ++i) {
+    for (uint32_t i = 0; i < physdevCount; ++i) {
         ivk->vkGetPhysicalDeviceProperties(physdevs[i], &deviceInfos[i].physdevProps);
 
         VERBOSE("Considering Vulkan physical device %d : %s", i,
@@ -1463,7 +1461,7 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
 
     sVkEmulation->queueLock = std::make_shared<android::base::Lock>();
     {
-        android::base::AutoLock lock(*sVkEmulation->queueLock);
+        android::base::AutoLock queueLock(*sVkEmulation->queueLock);
         dvk->vkGetDeviceQueue(sVkEmulation->device,
                               sVkEmulation->deviceInfo.graphicsQueueFamilyIndices[0], 0,
                               &sVkEmulation->queue);
@@ -1761,7 +1759,8 @@ bool allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalMemoryInfo* in
     VkExportMemoryAllocateInfo exportAi = {
         .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
         .pNext = nullptr,
-        .handleTypes = getDefaultExternalMemoryHandleType(),
+        .handleTypes =
+            static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType()),
     };
 
     VkMemoryDedicatedAllocateInfo dedicatedAllocInfo = {
@@ -1912,7 +1911,7 @@ bool allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalMemoryInfo* in
 #endif
 
     if (opaqueFd) {
-        uint32_t streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_FD;
+        streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_FD;
         VkExternalMemoryHandleTypeFlagBits vkHandleType =
             VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
         if (sVkEmulation->deviceInfo.supportsDmaBuf) {
@@ -2444,7 +2443,7 @@ static bool createVkColorBufferLocked(uint32_t width, uint32_t height, GLenum in
     VkExternalMemoryImageCreateInfo extImageCi = {
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
         0,
-        getDefaultExternalMemoryHandleType(),
+        static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType()),
     };
 #if defined(__APPLE__)
     if (sVkEmulation->instanceSupportsMoltenVK) {
@@ -2585,6 +2584,10 @@ static bool createVkColorBufferLocked(uint32_t width, uint32_t height, GLenum in
                                               nullptr, VK_NULL_HANDLE};
     const bool addConversion = formatRequiresYcbcrConversion(imageVkFormat);
     if (addConversion) {
+        if (!sVkEmulation->deviceInfo.supportsSamplerYcbcrConversion) {
+            ERR("VkFormat: %d requires conversion, but device does not have required extension for conversion (%s)", imageVkFormat, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+            return false;
+        }
         VkSamplerYcbcrConversionCreateInfo ycbcrCreateInfo = {
             VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
             nullptr,
@@ -2754,11 +2757,13 @@ bool teardownVkColorBufferLocked(uint32_t colorBufferHandle) {
     if (infoPtr->initialized) {
         auto& info = *infoPtr;
         {
-            android::base::AutoLock lock(*sVkEmulation->queueLock);
+            android::base::AutoLock queueLock(*sVkEmulation->queueLock);
             VK_CHECK(vk->vkQueueWaitIdle(sVkEmulation->queue));
         }
         vk->vkDestroyImageView(sVkEmulation->device, info.imageView, nullptr);
-        vk->vkDestroySamplerYcbcrConversion(sVkEmulation->device, info.ycbcrConversion, nullptr);
+        if (sVkEmulation->deviceInfo.hasSamplerYcbcrConversionExtension) {
+            vk->vkDestroySamplerYcbcrConversion(sVkEmulation->device, info.ycbcrConversion, nullptr);
+        }
         vk->vkDestroyImage(sVkEmulation->device, info.image, nullptr);
         freeExternalMemoryLocked(vk, &info.memory);
     }
@@ -2775,17 +2780,15 @@ bool teardownVkColorBuffer(uint32_t colorBufferHandle) {
     return teardownVkColorBufferLocked(colorBufferHandle);
 }
 
-VkEmulation::ColorBufferInfo getColorBufferInfo(uint32_t colorBufferHandle) {
-    VkEmulation::ColorBufferInfo res;
-
+std::optional<VkEmulation::ColorBufferInfo> getColorBufferInfo(uint32_t colorBufferHandle) {
     AutoLock lock(sVkEmulationLock);
 
     auto infoPtr = android::base::find(sVkEmulation->colorBuffers, colorBufferHandle);
+    if (!infoPtr) {
+        return std::nullopt;
+    }
 
-    if (!infoPtr) return res;
-
-    res = *infoPtr;
-    return res;
+    return *infoPtr;
 }
 
 bool colorBufferNeedsUpdateBetweenGlAndVk(const VkEmulation::ColorBufferInfo& colorBufferInfo) {
@@ -3009,7 +3012,7 @@ bool readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32
     };
 
     {
-        android::base::AutoLock lock(*sVkEmulation->queueLock);
+        android::base::AutoLock queueLock(*sVkEmulation->queueLock);
         VK_CHECK(vk->vkQueueSubmit(sVkEmulation->queue, 1, &submitInfo,
                                    sVkEmulation->commandBufferFence));
     }
@@ -3185,8 +3188,7 @@ static bool updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, uint32_
     sVkEmulation->debugUtilsHelper.cmdBeginDebugLabel(
         commandBuffer, "updateColorBufferFromBytes(ColorBuffer:%d)", colorBufferHandle);
 
-    bool isSnapshotLoad =
-        VkDecoderGlobalState::get()->getSnapshotState() == VkDecoderGlobalState::Loading;
+    const bool isSnapshotLoad = VkDecoderGlobalState::get()->isSnapshotCurrentlyLoading();
     VkImageLayout currentLayout = colorBufferInfo->currentLayout;
     if (isSnapshotLoad) {
         currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -3264,7 +3266,7 @@ static bool updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, uint32_
     };
 
     {
-        android::base::AutoLock lock(*sVkEmulation->queueLock);
+        android::base::AutoLock queueLock(*sVkEmulation->queueLock);
         VK_CHECK(vk->vkQueueSubmit(sVkEmulation->queue, 1, &submitInfo,
                                    sVkEmulation->commandBufferFence));
     }
@@ -3472,7 +3474,7 @@ bool setupVkBuffer(uint64_t size, uint32_t bufferHandle, bool vulkanOnly, uint32
     VkExternalMemoryBufferCreateInfo extBufferCi = {
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
         0,
-        getDefaultExternalMemoryHandleType(),
+        static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType()),
     };
 
     void* extBufferCiPtr = nullptr;
@@ -3588,7 +3590,7 @@ bool teardownVkBuffer(uint32_t bufferHandle) {
     auto infoPtr = android::base::find(sVkEmulation->buffers, bufferHandle);
     if (!infoPtr) return false;
     {
-        android::base::AutoLock lock(*sVkEmulation->queueLock);
+        android::base::AutoLock queueLock(*sVkEmulation->queueLock);
         VK_CHECK(vk->vkQueueWaitIdle(sVkEmulation->queue));
     }
     auto& info = *infoPtr;
@@ -3695,7 +3697,7 @@ bool readBufferToBytes(uint32_t bufferHandle, uint64_t offset, uint64_t size, vo
     };
 
     {
-        android::base::AutoLock lock(*sVkEmulation->queueLock);
+        android::base::AutoLock queueLock(*sVkEmulation->queueLock);
         VK_CHECK(vk->vkQueueSubmit(sVkEmulation->queue, 1, &submitInfo,
                                    sVkEmulation->commandBufferFence));
     }
@@ -3802,7 +3804,7 @@ bool updateBufferFromBytes(uint32_t bufferHandle, uint64_t offset, uint64_t size
     };
 
     {
-        android::base::AutoLock lock(*sVkEmulation->queueLock);
+        android::base::AutoLock queueLock(*sVkEmulation->queueLock);
         VK_CHECK(vk->vkQueueSubmit(sVkEmulation->queue, 1, &submitInfo,
                                    sVkEmulation->commandBufferFence));
     }
@@ -4121,7 +4123,7 @@ void releaseColorBufferForGuestUse(uint32_t colorBufferHandle) {
         .pSignalSemaphores = nullptr,
     };
     {
-        android::base::AutoLock lock(*sVkEmulation->queueLock);
+        android::base::AutoLock queueLock(*sVkEmulation->queueLock);
         VK_CHECK(vk->vkQueueSubmit(sVkEmulation->queue, 1, &submitInfo, fence));
     }
 
