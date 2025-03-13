@@ -1033,7 +1033,7 @@ class VkDecoderGlobalState::Impl {
         mCreatedHandlesForSnapshotLoadIndex = 0;
     }
 
-    std::optional<uint32_t> getContextIdForDeviceLocked(VkDevice device) {
+    std::optional<uint32_t> getContextIdForDeviceLocked(VkDevice device) REQUIRES(mMutex) {
         auto deviceInfoIt = mDeviceInfo.find(device);
         if (deviceInfoIt == mDeviceInfo.end()) {
             return std::nullopt;
@@ -2701,7 +2701,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroyImageLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkImage image,
-                            const VkAllocationCallbacks* pAllocator) {
+                            const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto imageInfoIt = mImageInfo.find(image);
         if (imageInfoIt == mImageInfo.end()) return;
         auto& imageInfo = imageInfoIt->second;
@@ -2773,7 +2773,7 @@ class VkDecoderGlobalState::Impl {
 
     VkResult performBindImageMemory(android::base::BumpPool* pool,
                                     VkSnapshotApiCallInfo* snapshotInfo, VkDevice boxed_device,
-                                    const VkBindImageMemoryInfo* bimi) {
+                                    const VkBindImageMemoryInfo* bimi) EXCLUDES(mMutex) {
         auto image = bimi->image;
         auto memory = bimi->memory;
         auto memoryOffset = bimi->memoryOffset;
@@ -2822,7 +2822,8 @@ class VkDecoderGlobalState::Impl {
 
     VkResult on_vkBindImageMemory(android::base::BumpPool* pool,
                                   VkSnapshotApiCallInfo* snapshotInfo, VkDevice boxed_device,
-                                  VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset) {
+                                  VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset)
+        EXCLUDES(mMutex) {
         const VkBindImageMemoryInfo bimi = {
             .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,
             .pNext = nullptr,
@@ -2835,8 +2836,8 @@ class VkDecoderGlobalState::Impl {
 
     VkResult on_vkBindImageMemory2(android::base::BumpPool* pool,
                                    VkSnapshotApiCallInfo* snapshotInfo, VkDevice boxed_device,
-                                   uint32_t bindInfoCount,
-                                   const VkBindImageMemoryInfo* pBindInfos) {
+                                   uint32_t bindInfoCount, const VkBindImageMemoryInfo* pBindInfos)
+        EXCLUDES(mMutex) {
 #ifdef GFXSTREAM_BUILD_WITH_SNAPSHOT_SUPPORT
         if (bindInfoCount > 1 && snapshotsEnabled()) {
             if (mVerbosePrints) {
@@ -2850,24 +2851,29 @@ class VkDecoderGlobalState::Impl {
 
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
+
         bool needEmulation = false;
 
-        auto* deviceInfo = android::base::find(mDeviceInfo, device);
-        if (!deviceInfo) return VK_ERROR_UNKNOWN;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
 
-        for (uint32_t i = 0; i < bindInfoCount; i++) {
-            auto* imageInfo = android::base::find(mImageInfo, pBindInfos[i].image);
-            if (!imageInfo) return VK_ERROR_UNKNOWN;
+            auto* deviceInfo = android::base::find(mDeviceInfo, device);
+            if (!deviceInfo) return VK_ERROR_UNKNOWN;
 
-            const auto* anb = vk_find_struct<VkNativeBufferANDROID>(&pBindInfos[i]);
-            if (anb != nullptr) {
-                needEmulation = true;
-                break;
-            }
+            for (uint32_t i = 0; i < bindInfoCount; i++) {
+                auto* imageInfo = android::base::find(mImageInfo, pBindInfos[i].image);
+                if (!imageInfo) return VK_ERROR_UNKNOWN;
 
-            if (deviceInfo->needEmulatedDecompression(imageInfo->cmpInfo)) {
-                needEmulation = true;
-                break;
+                const auto* anb = vk_find_struct<VkNativeBufferANDROID>(&pBindInfos[i]);
+                if (anb != nullptr) {
+                    needEmulation = true;
+                    break;
+                }
+
+                if (deviceInfo->needEmulatedDecompression(imageInfo->cmpInfo)) {
+                    needEmulation = true;
+                    break;
+                }
             }
         }
 
@@ -2886,21 +2892,26 @@ class VkDecoderGlobalState::Impl {
             return result;
         }
 
-        std::lock_guard<std::mutex> lock(mMutex);
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
 
-        for (uint32_t i = 0; i < bindInfoCount; i++) {
-            auto* memoryInfo = android::base::find(mMemoryInfo, pBindInfos[i].memory);
-            if (!memoryInfo) return VK_ERROR_OUT_OF_HOST_MEMORY;
+            auto* deviceInfo = android::base::find(mDeviceInfo, device);
+            if (!deviceInfo) return VK_ERROR_UNKNOWN;
 
-            auto* imageInfo = android::base::find(mImageInfo, pBindInfos[i].image);
-            if (!imageInfo) return VK_ERROR_OUT_OF_HOST_MEMORY;
+            for (uint32_t i = 0; i < bindInfoCount; i++) {
+                auto* memoryInfo = android::base::find(mMemoryInfo, pBindInfos[i].memory);
+                if (!memoryInfo) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-            imageInfo->boundColorBuffer = memoryInfo->boundColorBuffer;
-            if (memoryInfo->boundColorBuffer && deviceInfo->debugUtilsHelper.isEnabled()) {
-                deviceInfo->debugUtilsHelper.addDebugLabel(
-                    pBindInfos[i].image, "ColorBuffer:%d", *memoryInfo->boundColorBuffer);
+                auto* imageInfo = android::base::find(mImageInfo, pBindInfos[i].image);
+                if (!imageInfo) return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+                imageInfo->boundColorBuffer = memoryInfo->boundColorBuffer;
+                if (memoryInfo->boundColorBuffer && deviceInfo->debugUtilsHelper.isEnabled()) {
+                    deviceInfo->debugUtilsHelper.addDebugLabel(
+                        pBindInfos[i].image, "ColorBuffer:%d", *memoryInfo->boundColorBuffer);
+                }
+                imageInfo->memory = pBindInfos[i].memory;
             }
-            imageInfo->memory = pBindInfos[i].memory;
         }
 
         return result;
@@ -2971,7 +2982,8 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroyImageViewLocked(VkDevice device, VulkanDispatch* deviceDispatch,
-                                VkImageView imageView, const VkAllocationCallbacks* pAllocator) {
+                                VkImageView imageView, const VkAllocationCallbacks* pAllocator)
+        REQUIRES(mMutex) {
         auto imageViewInfoIt = mImageViewInfo.find(imageView);
         if (imageViewInfoIt == mImageViewInfo.end()) return;
         auto& imageViewInfo = imageViewInfoIt->second;
@@ -3034,7 +3046,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroySamplerLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkSampler sampler,
-                              const VkAllocationCallbacks* pAllocator) {
+                              const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto samplerInfoIt = mSamplerInfo.find(sampler);
         if (samplerInfoIt == mSamplerInfo.end()) return;
         auto& samplerInfo = samplerInfoIt->second;
@@ -3056,7 +3068,8 @@ class VkDecoderGlobalState::Impl {
 
     VkResult exportSemaphore(
         VulkanDispatch* vk, VkDevice device, VkSemaphore semaphore, VK_EXT_SYNC_HANDLE* outHandle,
-        std::optional<VkExternalSemaphoreHandleTypeFlagBits> handleType = std::nullopt) {
+        std::optional<VkExternalSemaphoreHandleTypeFlagBits> handleType = std::nullopt)
+        EXCLUDES(mMutex) {
 #if defined(_WIN32)
         VkSemaphoreGetWin32HandleInfoKHR getWin32 = {
             VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR,
@@ -3080,11 +3093,14 @@ class VkDecoderGlobalState::Impl {
             handleTypeBits,
         };
 
-        if (!hasDeviceExtension(device, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
-            // Note: VK_KHR_external_semaphore_fd might be advertised in the guest,
-            // because SYNC_FD handling is performed guest-side only. But still need
-            // need to error out here when handling a non-sync, opaque FD.
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            if (!hasDeviceExtension(device, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
+                // Note: VK_KHR_external_semaphore_fd might be advertised in the guest,
+                // because SYNC_FD handling is performed guest-side only. But still need
+                // need to error out here when handling a non-sync, opaque FD.
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
+            }
         }
 
         return vk->vkGetSemaphoreFdKHR(device, &getFd, outHandle);
@@ -3305,7 +3321,13 @@ class VkDecoderGlobalState::Impl {
         // For external fences, we unilaterally put them in the pool to ensure they finish
         // TODO: should store creation info / pNext chain per fence and re-apply?
         VkFenceCreateInfo createInfo{
-            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .pNext = 0, .flags = 0};
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .pNext = 0,
+            .flags = 0,
+        };
+
+        std::lock_guard<std::mutex> lock(mMutex);
+
         auto* deviceInfo = android::base::find(mDeviceInfo, device);
         if (!deviceInfo) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
         for (auto fence : externalFences) {
@@ -3316,7 +3338,6 @@ class VkDecoderGlobalState::Impl {
             deviceInfo->externalFencePool->add(fence);
 
             {
-                std::lock_guard<std::mutex> lock(mMutex);
                 auto boxed_fence = unboxed_to_boxed_non_dispatchable_VkFence(fence);
                 set_boxed_non_dispatchable_VkFence(boxed_fence, replacement);
 
@@ -3341,16 +3362,18 @@ class VkDecoderGlobalState::Impl {
         auto vk = dispatch_VkDevice(boxed_device);
 
 #ifdef _WIN32
-        std::lock_guard<std::mutex> lock(mMutex);
+        VK_EXT_SYNC_HANDLE handle = VK_EXT_SYNC_HANDLE_INVALID;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
 
-        auto* infoPtr = android::base::find(mSemaphoreInfo,
-                                            mExternalSemaphoresById[pImportSemaphoreFdInfo->fd]);
+            auto* infoPtr = android::base::find(
+                mSemaphoreInfo, mExternalSemaphoresById[pImportSemaphoreFdInfo->fd]);
+            if (!infoPtr) {
+                return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            }
 
-        if (!infoPtr) {
-            return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            handle = dupExternalSync(infoPtr->externalHandle);
         }
-
-        VK_EXT_SYNC_HANDLE handle = dupExternalSync(infoPtr->externalHandle);
 
         VkImportSemaphoreWin32HandleInfoKHR win32ImportInfo = {
             VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR,
@@ -3364,11 +3387,15 @@ class VkDecoderGlobalState::Impl {
 
         return vk->vkImportSemaphoreWin32HandleKHR(device, &win32ImportInfo);
 #else
-        if (!hasDeviceExtension(device, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
-            // Note: VK_KHR_external_semaphore_fd might be advertised in the guest,
-            // because SYNC_FD handling is performed guest-side only. But still need
-            // need to error out here when handling a non-sync, opaque FD.
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+
+            if (!hasDeviceExtension(device, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
+                // Note: VK_KHR_external_semaphore_fd might be advertised in the guest,
+                // because SYNC_FD handling is performed guest-side only. But still need
+                // need to error out here when handling a non-sync, opaque FD.
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
+            }
         }
 
         VkImportSemaphoreFdInfoKHR importInfo = *pImportSemaphoreFdInfo;
@@ -3456,7 +3483,8 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroySemaphoreWithExclusiveInfo(VkDevice device, VulkanDispatch* deviceDispatch,
-                                           VkSemaphore semaphore, SemaphoreInfo& semaphoreInfo,
+                                           VkSemaphore semaphore, DeviceInfo& deviceInfo,
+                                           SemaphoreInfo& semaphoreInfo,
                                            const VkAllocationCallbacks* pAllocator) {
 #ifndef _WIN32
         if (semaphoreInfo.externalHandle != VK_EXT_SYNC_HANDLE_INVALID) {
@@ -3465,25 +3493,26 @@ class VkDecoderGlobalState::Impl {
 #endif
 
         if (semaphoreInfo.latestUse && !IsDone(*semaphoreInfo.latestUse)) {
-            auto deviceInfoIt = mDeviceInfo.find(device);
-            if (deviceInfoIt != mDeviceInfo.end()) {
-                auto& deviceInfo = deviceInfoIt->second;
-                deviceInfo.deviceOpTracker->AddPendingGarbage(*semaphoreInfo.latestUse, semaphore);
-                deviceInfo.deviceOpTracker->PollAndProcessGarbage();
-            }
+            deviceInfo.deviceOpTracker->AddPendingGarbage(*semaphoreInfo.latestUse, semaphore);
+            deviceInfo.deviceOpTracker->PollAndProcessGarbage();
         } else {
             deviceDispatch->vkDestroySemaphore(device, semaphore, pAllocator);
         }
     }
 
     void destroySemaphoreLocked(VkDevice device, VulkanDispatch* deviceDispatch,
-                                VkSemaphore semaphore, const VkAllocationCallbacks* pAllocator) {
+                                VkSemaphore semaphore, const VkAllocationCallbacks* pAllocator)
+        REQUIRES(mMutex) {
+        auto deviceInfoIt = mDeviceInfo.find(device);
+        if (deviceInfoIt == mDeviceInfo.end()) return;
+        auto& deviceInfo = deviceInfoIt->second;
+
         auto semaphoreInfoIt = mSemaphoreInfo.find(semaphore);
         if (semaphoreInfoIt == mSemaphoreInfo.end()) return;
         auto& semaphoreInfo = semaphoreInfoIt->second;
 
-        destroySemaphoreWithExclusiveInfo(device, deviceDispatch, semaphore, semaphoreInfo,
-                                          pAllocator);
+        destroySemaphoreWithExclusiveInfo(device, deviceDispatch, semaphore, deviceInfo,
+                                          semaphoreInfo, pAllocator);
 
         mSemaphoreInfo.erase(semaphoreInfoIt);
     }
@@ -3529,7 +3558,7 @@ class VkDecoderGlobalState::Impl {
 
     void destroyFenceLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkFence fence,
                             const VkAllocationCallbacks* pAllocator,
-                            bool allowExternalFenceRecycling) {
+                            bool allowExternalFenceRecycling) REQUIRES(mMutex) {
         auto fenceInfoIt = mFenceInfo.find(fence);
         if (fenceInfoIt == mFenceInfo.end()) {
             ERR("Failed to find fence info for VkFence:%p. Leaking fence!", fence);
@@ -4149,7 +4178,7 @@ class VkDecoderGlobalState::Impl {
 
     void destroyShaderModuleLocked(VkDevice device, VulkanDispatch* deviceDispatch,
                                    VkShaderModule shaderModule,
-                                   const VkAllocationCallbacks* pAllocator) {
+                                   const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto shaderModuleInfoIt = mShaderModuleInfo.find(shaderModule);
         if (shaderModuleInfoIt == mShaderModuleInfo.end()) return;
         auto& shaderModuleInfo = shaderModuleInfoIt->second;
@@ -4204,7 +4233,7 @@ class VkDecoderGlobalState::Impl {
 
     void destroyPipelineCacheLocked(VkDevice device, VulkanDispatch* deviceDispatch,
                                     VkPipelineCache pipelineCache,
-                                    const VkAllocationCallbacks* pAllocator) {
+                                    const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto pipelineCacheInfoIt = mPipelineCacheInfo.find(pipelineCache);
         if (pipelineCacheInfoIt == mPipelineCacheInfo.end()) return;
         auto& pipelineCacheInfo = pipelineCacheInfoIt->second;
@@ -4259,7 +4288,7 @@ class VkDecoderGlobalState::Impl {
 
     void destroyPipelineLayoutLocked(VkDevice device, VulkanDispatch* deviceDispatch,
                                      VkPipelineLayout pipelineLayout,
-                                     const VkAllocationCallbacks* pAllocator) {
+                                     const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto pipelineLayoutInfoIt = mPipelineLayoutInfo.find(pipelineLayout);
         if (pipelineLayoutInfoIt == mPipelineLayoutInfo.end()) return;
         auto& pipelineLayoutInfo = pipelineLayoutInfoIt->second;
@@ -4351,7 +4380,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroyPipelineLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkPipeline pipeline,
-                               const VkAllocationCallbacks* pAllocator) {
+                               const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto pipelineInfoIt = mPipelineInfo.find(pipeline);
         if (pipelineInfoIt == mPipelineInfo.end()) return;
         auto& pipelineInfo = pipelineInfoIt->second;
@@ -5079,8 +5108,8 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool mapHostVisibleMemoryToGuestPhysicalAddressLocked(VulkanDispatch* vk, VkDevice device,
-                                                          VkDeviceMemory memory,
-                                                          uint64_t physAddr) {
+                                                          VkDeviceMemory memory, uint64_t physAddr)
+        REQUIRES(mMutex) {
         if (!m_emu->features.GlDirectMem.enabled &&
             !m_emu->features.VirtioGpuNext.enabled) {
             // INFO("%s: Tried to use direct mapping "
@@ -5442,6 +5471,8 @@ class VkDecoderGlobalState::Impl {
         uint32_t virtioGpuContextId = 0;
         VkMemoryPropertyFlags memoryPropertyFlags;
 
+        bool deviceHasDmabufExt = false;
+
         // Map guest memory index to host memory index and lookup memory properties:
         {
             std::lock_guard<std::mutex> lock(mMutex);
@@ -5457,6 +5488,9 @@ class VkDecoderGlobalState::Impl {
                 GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
                     << "No physical device info available for " << *physicalDevice;
             }
+
+            deviceHasDmabufExt =
+                hasDeviceExtension(device, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
 
             const auto hostMemoryInfoOpt =
                 physicalDeviceInfo->memoryPropertiesHelper
@@ -5506,8 +5540,7 @@ class VkDecoderGlobalState::Impl {
             vk_append_struct(&structChainIter, &importWin32HandleInfo);
 #else
             importFdInfo.fd = rawDescriptor;
-            if (m_emu->deviceInfo.supportsDmaBuf &&
-                hasDeviceExtension(device, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
+            if (m_emu->deviceInfo.supportsDmaBuf && deviceHasDmabufExt) {
                 importFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
             }
             vk_append_struct(&structChainIter, &importFdInfo);
@@ -5575,8 +5608,7 @@ class VkDecoderGlobalState::Impl {
 #endif
 
 #ifdef __linux__
-                if (m_emu->deviceInfo.supportsDmaBuf &&
-                    hasDeviceExtension(device, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
+                if (m_emu->deviceInfo.supportsDmaBuf && deviceHasDmabufExt) {
                     handleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
                 }
 #endif
@@ -5748,7 +5780,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     void freeMemoryLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkDeviceMemory memory,
-                          const VkAllocationCallbacks* pAllocator) {
+                          const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto memoryInfoIt = mMemoryInfo.find(memory);
         if (memoryInfoIt == mMemoryInfo.end()) return;
         auto& memoryInfo = memoryInfoIt->second;
@@ -5776,7 +5808,8 @@ class VkDecoderGlobalState::Impl {
         return on_vkMapMemoryLocked(0, memory, offset, size, flags, ppData);
     }
     VkResult on_vkMapMemoryLocked(VkDevice, VkDeviceMemory memory, VkDeviceSize offset,
-                                  VkDeviceSize size, VkMemoryMapFlags flags, void** ppData) {
+                                  VkDeviceSize size, VkMemoryMapFlags flags, void** ppData)
+        REQUIRES(mMutex) {
         auto* info = android::base::find(mMemoryInfo, memory);
         if (!info || !info->ptr) return VK_ERROR_MEMORY_MAP_FAILED;  // Invalid usage.
 
@@ -5848,7 +5881,7 @@ class VkDecoderGlobalState::Impl {
         return false;
     }
 
-    bool hasDeviceExtension(VkDevice device, const std::string& name) {
+    bool hasDeviceExtension(VkDevice device, const std::string& name) REQUIRES(mMutex) {
         auto* info = android::base::find(mDeviceInfo, device);
         if (!info) return false;
 
@@ -7124,7 +7157,8 @@ class VkDecoderGlobalState::Impl {
     }
 
     void destroyRenderPassLocked(VkDevice device, VulkanDispatch* deviceDispatch,
-                                 VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator) {
+                                 VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator)
+        REQUIRES(mMutex) {
         auto renderPassInfoIt = mRenderPassInfo.find(renderPass);
         if (renderPassInfoIt == mRenderPassInfo.end()) return;
         auto& renderPassInfo = renderPassInfoIt->second;
@@ -7274,7 +7308,7 @@ class VkDecoderGlobalState::Impl {
 
     void destroyFramebufferLocked(VkDevice device, VulkanDispatch* deviceDispatch,
                                   VkFramebuffer framebuffer,
-                                  const VkAllocationCallbacks* pAllocator) {
+                                  const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
         auto framebufferInfoIt = mFramebufferInfo.find(framebuffer);
         if (framebufferInfoIt == mFramebufferInfo.end()) return;
         auto& framebufferInfo = framebufferInfoIt->second;
@@ -8478,7 +8512,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool getDefaultQueueForDeviceLocked(VkDevice device, VkQueue* queue, uint32_t* queueFamilyIndex,
-                                        std::mutex** queueMutex) {
+                                        std::mutex** queueMutex) REQUIRES(mMutex) {
         auto* deviceInfo = android::base::find(mDeviceInfo, device);
         if (!deviceInfo) return false;
 
@@ -8509,7 +8543,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     void updateImageMemorySizeLocked(VkDevice device, VkImage image,
-                                     VkMemoryRequirements* pMemoryRequirements) {
+                                     VkMemoryRequirements* pMemoryRequirements) REQUIRES(mMutex) {
         auto* deviceInfo = android::base::find(mDeviceInfo, device);
         if (!deviceInfo->emulateTextureEtc2 && !deviceInfo->emulateTextureAstc) {
             return;
@@ -8843,7 +8877,8 @@ class VkDecoderGlobalState::Impl {
 
             LOG_CALLS_VERBOSE("destroyDeviceObjects: %zu semaphores.", deviceObjects.semaphores.size());
             for (auto& [semaphore, semaphoreInfo] : deviceObjects.semaphores) {
-                destroySemaphoreWithExclusiveInfo(device, deviceDispatch, semaphore, semaphoreInfo,
+                destroySemaphoreWithExclusiveInfo(device, deviceDispatch, semaphore,
+                                                  deviceObjects.device.mapped(), semaphoreInfo,
                                                   nullptr);
             }
 
@@ -9130,7 +9165,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     // Returns the VkInstance associated with a VkDevice, or null if it's not found
-    VkInstance* deviceToInstanceLocked(VkDevice device) {
+    VkInstance* deviceToInstanceLocked(VkDevice device) REQUIRES(mMutex) {
         auto* physicalDevice = android::base::find(mDeviceToPhysicalDevice, device);
         if (!physicalDevice) return nullptr;
         return android::base::find(mPhysicalDeviceToInstance, *physicalDevice);
@@ -9245,12 +9280,12 @@ class VkDecoderGlobalState::Impl {
     // Info tracking for vulkan objects
     std::unordered_map<VkInstance, InstanceInfo> mInstanceInfo GUARDED_BY(mMutex);
     std::unordered_map<VkPhysicalDevice, PhysicalDeviceInfo> mPhysdevInfo GUARDED_BY(mMutex);
-    std::unordered_map<VkDevice, DeviceInfo> mDeviceInfo;
+    std::unordered_map<VkDevice, DeviceInfo> mDeviceInfo GUARDED_BY(mMutex);
 
     // Back-reference to the physical device associated with a particular
     // VkDevice, and the VkDevice corresponding to a VkQueue.
-    std::unordered_map<VkDevice, VkPhysicalDevice> mDeviceToPhysicalDevice;
-    std::unordered_map<VkPhysicalDevice, VkInstance> mPhysicalDeviceToInstance;
+    std::unordered_map<VkDevice, VkPhysicalDevice> mDeviceToPhysicalDevice GUARDED_BY(mMutex);
+    std::unordered_map<VkPhysicalDevice, VkInstance> mPhysicalDeviceToInstance GUARDED_BY(mMutex);
 
     // Device objects
     std::unordered_map<VkBuffer, BufferInfo> mBufferInfo GUARDED_BY(mMutex);
@@ -9259,19 +9294,19 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkDescriptorPool, DescriptorPoolInfo> mDescriptorPoolInfo;
     std::unordered_map<VkDescriptorSet, DescriptorSetInfo> mDescriptorSetInfo;
     std::unordered_map<VkDescriptorSetLayout, DescriptorSetLayoutInfo> mDescriptorSetLayoutInfo;
-    std::unordered_map<VkDeviceMemory, MemoryInfo> mMemoryInfo;
-    std::unordered_map<VkFence, FenceInfo> mFenceInfo;
-    std::unordered_map<VkFramebuffer, FramebufferInfo> mFramebufferInfo;
-    std::unordered_map<VkImage, ImageInfo> mImageInfo;
-    std::unordered_map<VkImageView, ImageViewInfo> mImageViewInfo;
-    std::unordered_map<VkPipeline, PipelineInfo> mPipelineInfo;
-    std::unordered_map<VkPipelineCache, PipelineCacheInfo> mPipelineCacheInfo;
-    std::unordered_map<VkPipelineLayout, PipelineLayoutInfo> mPipelineLayoutInfo;
-    std::unordered_map<VkQueue, QueueInfo> mQueueInfo;
-    std::unordered_map<VkRenderPass, RenderPassInfo> mRenderPassInfo;
-    std::unordered_map<VkSampler, SamplerInfo> mSamplerInfo;
-    std::unordered_map<VkSemaphore, SemaphoreInfo> mSemaphoreInfo;
-    std::unordered_map<VkShaderModule, ShaderModuleInfo> mShaderModuleInfo;
+    std::unordered_map<VkDeviceMemory, MemoryInfo> mMemoryInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkFence, FenceInfo> mFenceInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkFramebuffer, FramebufferInfo> mFramebufferInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkImage, ImageInfo> mImageInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkImageView, ImageViewInfo> mImageViewInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkPipeline, PipelineInfo> mPipelineInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkPipelineCache, PipelineCacheInfo> mPipelineCacheInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkPipelineLayout, PipelineLayoutInfo> mPipelineLayoutInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkQueue, QueueInfo> mQueueInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkRenderPass, RenderPassInfo> mRenderPassInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkSampler, SamplerInfo> mSamplerInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkSemaphore, SemaphoreInfo> mSemaphoreInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkShaderModule, ShaderModuleInfo> mShaderModuleInfo GUARDED_BY(mMutex);
 
 #ifdef _WIN32
     int mSemaphoreId = 1;
