@@ -221,8 +221,10 @@ struct FeatureSet {
     };
     FeatureInfo BypassVulkanDeviceFeatureOverrides = {
         "BypassVulkanDeviceFeatureOverrides",
-        "We are force disabling (overriding) some vulkan features (private data, uniform inline block etc) which the device may naturally support."
-        "If toggled ON, this flag will cause the host side to not force disable anything and let the device fully advertise supported features.",
+        "We are force disabling (overriding) some vulkan features (private data, uniform inline "
+        "block etc) which the device may naturally support."
+        "If toggled ON, this flag will cause the host side to not force disable anything and let "
+        "the device fully advertise supported features.",
         &map,
     };
     FeatureInfo VulkanAllocateDeviceMemoryOnly = {
@@ -321,17 +323,12 @@ struct FeatureSet {
         "device properties for the guest queries.",
         &map,
     };
-};
-struct FeatureDependencyHandler {
-    FeatureDependencyHandler(const FeatureSet& set) : featureSetView(set){}
-    const FeatureSet& featureSetView;
-    const std::map<const FeatureInfo*, std::vector<const FeatureInfo*>> VK_FEATURE_DEPENDENCY_MAP= {
-        // List other dependencies here in the shape of:
-        // {FEATURE_X, {DEPENDENT_FEATURE_A, DEPENDENT_FEATURE_B}}
-        {&featureSetView.VulkanSnapshots, {&featureSetView.VulkanBatchedDescriptorSetUpdate, &featureSetView.Vulkan}},
+    FeatureInfo VulkanRobustness = {
+        "VulkanRobustness",
+        "If enabled, robustness extensions with all supported features will be enabled on "
+        "all created devices. (e.g. VK_EXT_robustness2)",
+        &map,
     };
-
-    FeatureResult checkAllDependentFeaturesAreEnabled();
 };
 
 #define GFXSTREAM_SET_FEATURE_ON_CONDITION(set, feature, condition) \

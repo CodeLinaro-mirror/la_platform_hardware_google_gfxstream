@@ -178,11 +178,6 @@ bool postOnlyOnMainThread() {
 #endif
 }
 
-AstcEmulationMode getAstcEmulationMode() {
-    return AstcEmulationMode::Gpu;
-//    return AstcEmulationMode::Cpu;
-}
-
 }  // namespace
 
 // |sInitialized| caches the initialized framebuffer state - this way
@@ -360,11 +355,11 @@ bool FrameBuffer::initialize(int width, int height, gfxstream::host::FeatureSet 
 #endif
         };
         fb->m_emulationVk = vk::VkEmulation::create(vkDispatch, callbacks, fb->m_features);
-        if (!fb->m_emulationVk) {
+        if (fb->m_emulationVk) {
+            vk::VkDecoderGlobalState::initialize(fb->m_emulationVk.get());
+        } else {
             ERR("Failed to initialize global Vulkan emulation. Disable the Vulkan support.");
         }
-
-        vk::VkDecoderGlobalState::initialize(fb->m_emulationVk.get());
     }
     if (fb->m_emulationVk) {
         fb->m_vulkanEnabled = true;
@@ -488,7 +483,7 @@ bool FrameBuffer::initialize(int width, int height, gfxstream::host::FeatureSet 
 
     GL_LOG("glvk interop final: %d", fb->m_vulkanInteropSupported);
     vkEmulationFeatures.glInteropSupported = fb->m_vulkanInteropSupported;
-    if (fb->m_features.Vulkan.enabled) {
+    if (fb->m_emulationVk && fb->m_features.Vulkan.enabled) {
         fb->m_emulationVk->initFeatures(std::move(vkEmulationFeatures));
 
         auto* display = fb->m_emulationVk->getDisplay();
@@ -498,7 +493,7 @@ bool FrameBuffer::initialize(int width, int height, gfxstream::host::FeatureSet 
         }
     }
 
-    if (fb->m_useVulkanComposition) {
+    if (fb->m_emulationVk && fb->m_useVulkanComposition) {
         fb->m_compositor = fb->m_emulationVk->getCompositor();
         if (!fb->m_compositor) {
             ERR("Failed to get CompositorVk from VkEmulation.");
@@ -3279,7 +3274,6 @@ void FrameBuffer::createEmulatedEglFenceSync(EGLenum type, int destroyWhenSignal
         GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) << "RenderThreadInfoGl not available.";
     }
     if (!info->currContext) {
-        auto fb = FrameBuffer::getFB();
         uint32_t syncContext;
         uint32_t syncSurface;
         createTrivialContext(0,  // There is no context to share.

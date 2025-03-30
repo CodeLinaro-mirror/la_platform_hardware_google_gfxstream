@@ -201,12 +201,6 @@ static constexpr uint64_t kPageMaskForBlob = ~(0xfff);
 
 static std::atomic<uint64_t> sNextHostBlobId{1};
 
-// b/319729462
-// On snapshot load, thread local data is not available, thus we use a
-// fake context ID. We will eventually need to fix it once we start using
-// snapshot with virtio.
-static uint32_t kTemporaryContextIdForSnapshotLoading = 1;
-
 class VkDecoderGlobalState::Impl {
    public:
     Impl(VkEmulation* emulation)
@@ -1274,6 +1268,11 @@ class VkDecoderGlobalState::Impl {
                 // information to mark as unsupported (see b/329845987).
                 protectedMemoryFeatures->protectedMemory = VK_FALSE;
             }
+            VkPhysicalDeviceVulkan11Features* vk11Features =
+                vk_find_struct<VkPhysicalDeviceVulkan11Features>(pFeatures);
+            if (vk11Features != nullptr) {
+                vk11Features->protectedMemory = VK_FALSE;
+            }
 
             VkPhysicalDevicePrivateDataFeatures* privateDataFeatures =
                 vk_find_struct<VkPhysicalDevicePrivateDataFeatures>(pFeatures);
@@ -1585,7 +1584,6 @@ class VkDecoderGlobalState::Impl {
         VkPhysicalDevice boxed_physicalDevice, uint32_t* pQueueFamilyPropertyCount,
         VkQueueFamilyProperties* pQueueFamilyProperties) {
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
-        auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
 
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -1653,7 +1651,6 @@ class VkDecoderGlobalState::Impl {
         VkPhysicalDevice boxed_physicalDevice,
         VkPhysicalDeviceMemoryProperties* pMemoryProperties) {
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
-        auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
 
         std::lock_guard<std::mutex> lock(mMutex);
 
@@ -1782,7 +1779,11 @@ class VkDecoderGlobalState::Impl {
         uint32_t supportedFenceHandleTypes = 0;
         uint32_t supportedBinarySemaphoreHandleTypes = 0;
         // Run the underlying API call, filtering extensions.
-        VkDeviceCreateInfo createInfoFiltered = *pCreateInfo;
+
+        VkDeviceCreateInfo createInfoFiltered;
+        deepcopy_VkDeviceCreateInfo(pool, VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, pCreateInfo,
+                                      &createInfoFiltered);
+
         // According to the spec, it seems that the application can use compressed texture formats
         // without enabling the feature when creating the VkDevice, as long as
         // vkGetPhysicalDeviceFormatProperties and vkGetPhysicalDeviceImageFormatProperties reports
@@ -1821,9 +1822,41 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
+        VkPhysicalDeviceRobustness2FeaturesEXT modifiedRobustness2features;
+        const auto r2features = m_vkEmulation->getRobustness2Features();
+        if (r2features && vk_find_struct<VkPhysicalDeviceRobustness2FeaturesEXT>(
+                                       &createInfoFiltered) == nullptr) {
+            VERBOSE("Force-enabling VK_EXT_robustness2 on device creation.");
+            updatedDeviceExtensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+            modifiedRobustness2features = *r2features;
+            modifiedRobustness2features.pNext = const_cast<void*>(createInfoFiltered.pNext);
+            createInfoFiltered.pNext = &modifiedRobustness2features;
+        }
+
         if (VkPhysicalDeviceFeatures2* features2 =
                 vk_find_struct<VkPhysicalDeviceFeatures2>(&createInfoFiltered)) {
             featuresToFilter.emplace_back(&features2->features);
+        }
+
+        {
+            // Protected memory is not supported on emulators. Override feature
+            // information to mark as unsupported (see b/329845987).
+            VkPhysicalDeviceProtectedMemoryFeatures* protectedMemoryFeatures =
+                vk_find_struct<VkPhysicalDeviceProtectedMemoryFeatures>(&createInfoFiltered);
+            if (protectedMemoryFeatures != nullptr) {
+                protectedMemoryFeatures->protectedMemory = VK_FALSE;
+            }
+
+            VkPhysicalDeviceVulkan11Features* vk11Features =
+                vk_find_struct<VkPhysicalDeviceVulkan11Features>(&createInfoFiltered);
+            if (vk11Features != nullptr) {
+                vk11Features->protectedMemory = VK_FALSE;
+            }
+
+            for (uint32_t i = 0; i < createInfoFiltered.queueCreateInfoCount; i++) {
+                (const_cast<VkDeviceQueueCreateInfo*>(createInfoFiltered.pQueueCreateInfos))[i]
+                    .flags &= ~VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT;
+            }
         }
 
         VkPhysicalDeviceDiagnosticsConfigFeaturesNV deviceDiagnosticsConfigFeatures = {
@@ -2184,7 +2217,7 @@ class VkDecoderGlobalState::Impl {
         // queue. See b/328436383.
         if (pQueueInfo->flags & VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT) {
             *pQueue = VK_NULL_HANDLE;
-            INFO("%s: Cannot get protected Vulkan device queue", __func__);
+            WARN("%s: Cannot get protected Vulkan device queue", __func__);
             return;
         }
         uint32_t queueFamilyIndex = pQueueInfo->queueFamilyIndex;
@@ -2578,9 +2611,6 @@ class VkDecoderGlobalState::Impl {
                                                VkSnapshotApiCallInfo* snapshotInfo,
                                                VkDevice boxed_device,
                                                const VkBindImageMemoryInfo* bimi) {
-        auto device = unbox_VkDevice(boxed_device);
-        auto vk = dispatch_VkDevice(boxed_device);
-
         auto original_underlying_image = bimi->image;
         auto original_boxed_image = unboxed_to_boxed_non_dispatchable_VkImage(original_underlying_image);
 
@@ -3915,8 +3945,6 @@ class VkDecoderGlobalState::Impl {
         std::unique_ptr<bool[]> descriptorWritesNeedDeepCopy(new bool[descriptorWriteCount]);
         for (uint32_t i = 0; i < descriptorWriteCount; i++) {
             const VkWriteDescriptorSet& descriptorWrite = pDescriptorWrites[i];
-            auto descriptorSetInfo =
-                android::base::find(mDescriptorSetInfo, descriptorWrite.dstSet);
             descriptorWritesNeedDeepCopy[i] = false;
             if (!vk_util::vk_descriptor_type_has_image_view(descriptorWrite.descriptorType)) {
                 continue;
@@ -5048,11 +5076,9 @@ class VkDecoderGlobalState::Impl {
     VkResult on_vkAllocateMemory(android::base::BumpPool* pool, VkSnapshotApiCallInfo*,
                                  VkDevice boxed_device, const VkMemoryAllocateInfo* pAllocateInfo,
                                  const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory) {
+        if (!pAllocateInfo) return VK_ERROR_INITIALIZATION_FAILED;
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
-        auto* tInfo = RenderThreadInfoVk::get();
-
-        if (!pAllocateInfo) return VK_ERROR_INITIALIZATION_FAILED;
 
         VkMemoryAllocateInfo localAllocInfo = vk_make_orphan_copy(*pAllocateInfo);
         vk_struct_chain_iterator structChainIter = vk_make_chain_iterator(&localAllocInfo);
@@ -5287,7 +5313,7 @@ class VkDecoderGlobalState::Impl {
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
 
-                importInfoMetalHandle.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT;
+                importInfoMetalHandle.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
                 importInfoMetalHandle.handle = bufferMetalMemoryHandle;
 
                 vk_append_struct(&structChainIter, &importInfoMetalHandle);
@@ -5467,7 +5493,7 @@ class VkDecoderGlobalState::Impl {
 #if defined(__APPLE__)
                 if (m_vkEmulation->supportsMoltenVk()) {
                     // Using a different handle type when in MoltenVK mode
-                    handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT|VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT;
+                    handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
                 } else {
                     handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
                 }
@@ -6094,8 +6120,20 @@ class VkDecoderGlobalState::Impl {
                                     VkCommandPool* pCommandPool) {
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
+        if (!pCreateInfo) {
+            WARN("%s: Invalid parameter.", __func__);
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
 
-        VkResult result = vk->vkCreateCommandPool(device, pCreateInfo, pAllocator, pCommandPool);
+        VkCommandPoolCreateInfo localCI = *pCreateInfo;
+        if (localCI.flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT) {
+            // Protected memory is not supported on emulators. Override feature
+            // information to mark as unsupported (see b/329845987).
+            localCI.flags &= ~VK_COMMAND_POOL_CREATE_PROTECTED_BIT;
+            VERBOSE("Changed VK_COMMAND_POOL_CREATE_PROTECTED_BIT, new flags = %d", localCI.flags);
+        }
+
+        VkResult result = vk->vkCreateCommandPool(device, &localCI, pAllocator, pCommandPool);
         if (result != VK_SUCCESS) {
             return result;
         }
@@ -8467,7 +8505,6 @@ class VkDecoderGlobalState::Impl {
     void extractInstanceAndDependenciesLocked(VkInstance instance, InstanceObjects& objects) REQUIRES(mMutex) {
         auto instanceInfoIt = mInstanceInfo.find(instance);
         if (instanceInfoIt == mInstanceInfo.end()) return;
-        auto& instanceInfo = instanceInfoIt->second;
 
         objects.instance = mInstanceInfo.extract(instanceInfoIt);
 
