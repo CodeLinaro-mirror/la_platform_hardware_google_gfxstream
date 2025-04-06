@@ -25,6 +25,7 @@
 #include <variant>
 
 #include "VulkanDispatch.h"
+#include "aemu/base/ThreadAnnotations.h"
 
 namespace gfxstream {
 namespace vk {
@@ -59,11 +60,8 @@ class DeviceOpTracker {
     // semaphore can be destroyed once the waitable has finished.
     void AddPendingGarbage(DeviceOpWaitable waitable, VkSemaphore semaphore);
 
-    // Checks for completion of previously submitted waitables and sets their state accordingly .
-    // This function is thread-safe
-    void Poll();
-
-    // Calls Poll(), and also destroys dependent objects accordingly
+    // Checks for completion of previously submitted waitables and destroys dependent
+    // objects.
     void PollAndProcessGarbage();
 
     void OnDestroyDevice();
@@ -82,7 +80,7 @@ class DeviceOpTracker {
         std::chrono::time_point<std::chrono::system_clock> timepoint;
     };
     std::mutex mPollFunctionsMutex;
-    std::deque<PollFunction> mPollFunctions;
+    std::deque<PollFunction> mPollFunctions GUARDED_BY(mPollFunctionsMutex);
 
     struct PendingGarbage {
         DeviceOpWaitable waitable;
@@ -90,7 +88,7 @@ class DeviceOpTracker {
         std::chrono::time_point<std::chrono::system_clock> timepoint;
     };
     std::mutex mPendingGarbageMutex;
-    std::deque<PendingGarbage> mPendingGarbage;
+    std::deque<PendingGarbage> mPendingGarbage GUARDED_BY(mPendingGarbageMutex);
 };
 
 class DeviceOpBuilder {

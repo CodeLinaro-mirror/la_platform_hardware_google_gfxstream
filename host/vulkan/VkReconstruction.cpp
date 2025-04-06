@@ -71,7 +71,7 @@ void VkReconstruction::clear() {
     mHandleReconstructions.clear();
 }
 
-void VkReconstruction::saveDecoderReplayBuffer(android::base::Stream* stream) {
+void VkReconstruction::saveReplayBuffers(android::base::Stream* stream) {
     DEBUG_RECON("start")
 
 #if DEBUG_RECONSTRUCTION
@@ -125,7 +125,7 @@ void VkReconstruction::saveDecoderReplayBuffer(android::base::Stream* stream) {
                 savedApis.insert(apiRef);
 #if DEBUG_RECONSTRUCTION
                 DEBUG_RECON("adding handle 0x%lx API 0x%lx op code %d", handle.first, apiRef,
-                            apiItem->opCode);
+                            GetOpcode(*apiItem));
 #endif
                 nextApis.push_back(apiRef);
             }
@@ -167,7 +167,7 @@ void VkReconstruction::saveDecoderReplayBuffer(android::base::Stream* stream) {
         for (auto apiHandle : uniqApiRefsByTopoOrder[i]) {
             auto item = mApiCallManager.get(apiHandle);
             // 4 bytes for opcode, and 4 bytes for saveBufferRaw's size field
-            DEBUG_RECON("saving api handle 0x%lx op code %d", apiHandle, GetOpcode(item));
+            DEBUG_RECON("saving api handle 0x%lx op code %d", apiHandle, GetOpcode(*item));
             memcpy(apiTracePtr, item->packet.data(), item->packet.size());
             apiTracePtr += item->packet.size();
         }
@@ -176,38 +176,18 @@ void VkReconstruction::saveDecoderReplayBuffer(android::base::Stream* stream) {
     DEBUG_RECON("created handle buffer size: %zu trace: %zu", createdHandleBuffer.size(),
                 apiTraceBuffer.size());
 
-    android::base::saveBufferRaw(stream, (char*)(createdHandleBuffer.data()),
-                                 createdHandleBuffer.size() * sizeof(uint64_t));
-    android::base::saveBufferRaw(stream, (char*)(apiTraceBuffer.data()), apiTraceBuffer.size());
+    android::base::saveBuffer(stream, createdHandleBuffer);
+    android::base::saveBuffer(stream, apiTraceBuffer);
 }
 
 /*static*/
-void VkReconstruction::loadDecoderReplayBuffer(android::base::Stream* stream,
-                                               std::vector<uint8_t>* outBuffer) {
+void VkReconstruction::loadReplayBuffers(android::base::Stream* stream,
+                                         std::vector<uint64_t>* outHandleBuffer,
+                                         std::vector<uint8_t>* outDecoderBuffer) {
     DEBUG_RECON("starting to unpack decoder replay buffer");
 
-    std::vector<uint8_t> createdHandleBuffer;
-    std::vector<uint8_t> apiTraceBuffer;
-
-    android::base::loadBuffer(stream, &createdHandleBuffer);
-    android::base::loadBuffer(stream, &apiTraceBuffer);
-
-    DEBUG_RECON("created handle buffer size: %zu trace: %zu", createdHandleBuffer.size(),
-                apiTraceBuffer.size());
-
-    outBuffer->resize(4 + createdHandleBuffer.size() + apiTraceBuffer.size());
-
-    uint8_t* outBufferData = outBuffer->data();
-
-    const uint32_t createdHandleBufferSize = createdHandleBuffer.size();
-    memcpy(outBufferData, &createdHandleBufferSize, sizeof(uint32_t));
-    outBufferData += sizeof(uint32_t);
-
-    memcpy(outBufferData, createdHandleBuffer.data(), createdHandleBufferSize);
-    outBufferData += createdHandleBufferSize;
-
-    memcpy(outBufferData, apiTraceBuffer.data(), apiTraceBuffer.size());
-    outBufferData += apiTraceBuffer.size();
+    android::base::loadBuffer(stream, outHandleBuffer);
+    android::base::loadBuffer(stream, outDecoderBuffer);
 
     DEBUG_RECON("finished unpacking decoder replay buffer");
 }
@@ -250,14 +230,17 @@ void VkReconstruction::destroyApiCallInfo(VkSnapshotApiCallHandle h) {
 
 void VkReconstruction::destroyApiCallInfoIfUnused(VkSnapshotApiCallInfo* info) {
     if (!info) return;
+    auto handle = info->handle;
+    auto currentInfo = mApiCallManager.get(handle);
+    if (!currentInfo) return;
 
-    if (info->packet.empty()) {
-        mApiCallManager.remove(info->handle);
+    if (currentInfo->packet.empty()) {
+        mApiCallManager.remove(handle);
         return;
     }
 
     if (!info->extraCreatedHandles.empty()) {
-        info->createdHandles.insert(info->createdHandles.end(), info->extraCreatedHandles.begin(),
+        currentInfo->createdHandles.insert(currentInfo->createdHandles.end(), info->extraCreatedHandles.begin(),
                                     info->extraCreatedHandles.end());
         info->extraCreatedHandles.clear();
     }
@@ -269,7 +252,10 @@ VkSnapshotApiCallInfo* VkReconstruction::getApiInfo(VkSnapshotApiCallHandle h) {
 
 void VkReconstruction::setApiTrace(VkSnapshotApiCallInfo* apiInfo, const uint8_t* packet,
                                    size_t packetLenBytes) {
-    apiInfo->packet.assign(packet, packet + packetLenBytes);
+    auto* info = mApiCallManager.get(apiInfo->handle);
+    if(info) {
+        info->packet.assign(packet, packet + packetLenBytes);
+    }
 }
 
 void VkReconstruction::dump() {
