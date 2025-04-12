@@ -208,8 +208,7 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
     // handle already assigned. This is for use with
     // virtio-gpu's RESOURCE_CREATE ioctl.
     void createColorBufferWithResourceHandle(int p_width, int p_height, GLenum p_internalFormat,
-                                             FrameworkFormat p_frameworkFormat, HandleType handle,
-                                             bool linear = false);
+                                             FrameworkFormat p_frameworkFormat, HandleType handle);
 
     // Create a new data Buffer instance from this display instance.
     // The buffer will be backed by a VkBuffer and VkDeviceMemory (if Vulkan
@@ -412,7 +411,6 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
     void registerVulkanInstance(uint64_t id, const char* appName) const;
     void unregisterVulkanInstance(uint64_t id) const;
 
-    bool isVulkanInteropSupported() const { return m_vulkanInteropSupported; }
     bool isVulkanEnabled() const { return m_vulkanEnabled; }
 
     // Saves a screenshot of the previous frame.
@@ -722,7 +720,7 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
     HandleType createColorBufferWithResourceHandleLocked(int p_width, int p_height,
                                                          GLenum p_internalFormat,
                                                          FrameworkFormat p_frameworkFormat,
-                                                         HandleType handle, bool linear = false);
+                                                         HandleType handle);
     HandleType createBufferWithResourceHandleLocked(int p_size, HandleType handle,
                                                     uint32_t memoryProperty);
 
@@ -861,7 +859,6 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
     android::base::WorkerProcessingResult postWorkerFunc(Post& post);
     std::future<void> sendPostWorkerCmd(Post post);
 
-    bool m_vulkanInteropSupported = false;
     bool m_vulkanEnabled = false;
     // Whether the guest manages ColorBuffer lifetime
     // so we don't need refcounting on the host side.
