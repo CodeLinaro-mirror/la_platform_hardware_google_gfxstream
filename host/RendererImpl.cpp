@@ -26,7 +26,7 @@
 #include "aemu/base/system/System.h"
 #include "aemu/base/threads/WorkerThread.h"
 #include "gfxstream/host/logging.h"
-#include "snapshot/common.h"
+#include "gfxstream/host/renderer_operations.h"
 
 #if GFXSTREAM_ENABLE_HOST_GLES
 #include "gl/EmulatedEglFenceSync.h"
@@ -380,7 +380,7 @@ void RendererImpl::resumeAll() {
 }
 
 void RendererImpl::save(android::base::Stream* stream,
-                        const android::snapshot::ITextureSaverPtr& textureSaver) {
+                        const ITextureSaverPtr& textureSaver) {
     stream->putByte(mStopped);
     if (mStopped) {
         return;
@@ -391,7 +391,7 @@ void RendererImpl::save(android::base::Stream* stream,
 }
 
 bool RendererImpl::load(android::base::Stream* stream,
-                        const android::snapshot::ITextureLoaderPtr& textureLoader) {
+                        const ITextureLoaderPtr& textureLoader) {
 
 #ifdef SNAPSHOT_PROFILE
     android::base::System::Duration startTime =
@@ -675,32 +675,13 @@ struct AndroidVirtioGpuOps* RendererImpl::getVirtioGpuOps() {
     return &sVirtioGpuOps;
 }
 
-void RendererImpl::snapshotOperationCallback(int op, int stage) {
-    using namespace android::snapshot;
-    switch (op) {
-        case SNAPSHOTTER_OPERATION_LOAD:
-            if (stage == SNAPSHOTTER_STAGE_START) {
-#ifdef SNAPSHOT_PROFILE
-             android::base::System::Duration startTime =
-                     android::base::System::get()->getUnixTimeUs();
-#endif
-                mRenderWindow->setPaused(true);
-                cleanupRenderThreads();
-#ifdef SNAPSHOT_PROFILE
-                printf("Previous session suspend time: %lld ms\n",
-                       (long long)(android::base::System::get()
-                                           ->getUnixTimeUs() -
-                                   startTime) /
-                               1000);
-#endif
-            }
-            if (stage == SNAPSHOTTER_STAGE_END) {
-                mRenderWindow->setPaused(false);
-            }
-            break;
-        default:
-            break;
-    }
+void RendererImpl::preLoad() {
+    mRenderWindow->setPaused(true);
+    cleanupRenderThreads();
+}
+
+void RendererImpl::postLoad() {
+    mRenderWindow->setPaused(false);
 }
 
 void RendererImpl::setVsyncHz(int vsyncHz) {
@@ -736,6 +717,14 @@ const void* RendererImpl::getGles2Dispatch() {
 #else
     return nullptr;
 #endif
+}
+
+void RendererImpl::setShouldSkipDraw(bool skip) {
+    set_gfxstream_should_skip_draw(skip);
+}
+
+bool RendererImpl::getShouldSkipDraw() const {
+    return get_gfxstream_should_skip_draw();
 }
 
 }  // namespace gfxstream

@@ -83,7 +83,6 @@
 #include "render-utils/Renderer.h"
 #include "render-utils/virtio_gpu_ops.h"
 #include "render-utils/render_api.h"
-#include "snapshot/common.h"
 #include "utils/RenderDoc.h"
 
 namespace gfxstream {
@@ -392,9 +391,9 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
     ~FrameBuffer();
 
     void onSave(android::base::Stream* stream,
-                const android::snapshot::ITextureSaverPtr& textureSaver);
+                const ITextureSaverPtr& textureSaver);
     bool onLoad(android::base::Stream* stream,
-                const android::snapshot::ITextureLoaderPtr& textureLoader);
+                const ITextureLoaderPtr& textureLoader);
 
     // lock and unlock handles (EmulatedEglContext, ColorBuffer, EmulatedEglWindowSurface)
     void lock() ACQUIRE(m_lock);
@@ -439,7 +438,7 @@ class FrameBuffer : public android::base::EventNotificationSupport<FrameBufferCh
     ColorBufferPtr findColorBuffer(HandleType p_colorbuffer);
     BufferPtr findBuffer(HandleType p_buffer);
 
-    void registerProcessCleanupCallback(void* key,
+    void registerProcessCleanupCallback(void* key, uint64_t contextId,
                                         std::function<void()> callback);
     void unregisterProcessCleanupCallback(void* key);
 

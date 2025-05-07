@@ -51,8 +51,8 @@
 #include "compressedTextureFormats/AstcCpuDecompressor.h"
 #include "gfxstream/host/Tracing.h"
 #include "gfxstream/host/logging.h"
+#include "gfxstream/host/address_space_operations.h"
 #include "gfxstream/host/vm_operations.h"
-#include "host-common/address_space_device_control_ops.h"
 #include "utils/RenderDoc.h"
 #include "vk_util.h"
 #include "vulkan/VkFormatUtils.h"
@@ -210,6 +210,7 @@ class VkDecoderGlobalState::Impl {
         if (!m_vkEmulation->getFeatures().BypassVulkanDeviceFeatureOverrides.enabled) {
             // TODO(b/407982047) Disable sparse binding features on Android
             // These are not supported widely on real devices and causes crashes
+            GFXSTREAM_INFO("Disabling sparse binding feature support");
             mDisableSparseBindingSupport = true;
         }
 #endif
@@ -218,9 +219,9 @@ class VkDecoderGlobalState::Impl {
         mLogging = android::base::getEnvironmentVariable("ANDROID_EMU_VK_LOG_CALLS") == "1";
         mVerbosePrints = android::base::getEnvironmentVariable("ANDROID_EMUGL_VERBOSE") == "1";
 
-        if (get_emugl_address_space_device_control_ops().control_get_hw_funcs &&
-            get_emugl_address_space_device_control_ops().control_get_hw_funcs()) {
-            mUseOldMemoryCleanupPath = 0 == get_emugl_address_space_device_control_ops()
+        if (get_gfxstream_address_space_ops().control_get_hw_funcs &&
+            get_gfxstream_address_space_ops().control_get_hw_funcs()) {
+            mUseOldMemoryCleanupPath = 0 == get_gfxstream_address_space_ops()
                                                 .control_get_hw_funcs()
                                                 ->getPhysAddrStartLocked();
         }
@@ -348,7 +349,15 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
-        GFXSTREAM_DEBUG("snapshot save: replay command stream");
+        GFXSTREAM_DEBUG("snapshot save: save boxed instance and context id");
+        {
+            stream->putBe64(static_cast<uint64_t>(mInstanceInfo.size()));
+            for (const auto& [instance, instanceInfo] : mInstanceInfo) {
+                stream->putBe64(reinterpret_cast<uint64_t>(instanceInfo.boxed));
+                stream->putBe32(reinterpret_cast<uint32_t>(instanceInfo.contextId));
+            }
+        }
+
         snapshot()->saveReplayBuffers(stream);
 
         // Save mapped memory
@@ -609,6 +618,18 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            mSnapshotLoadBoxedInstance2ContextId.clear();
+            const uint64_t count = stream->getBe64();
+            for (uint64_t i = 0; i < count; i++) {
+                const uint64_t boxed_instance = stream->getBe64();
+                const uint64_t contextId = stream->getBe32();
+                mSnapshotLoadBoxedInstance2ContextId[reinterpret_cast<VkInstance>(boxed_instance)] =
+                    contextId;
+            }
+        }
+
         // Replay command stream:
         GFXSTREAM_DEBUG("snapshot load: replay command stream");
         {
@@ -835,6 +856,7 @@ class VkDecoderGlobalState::Impl {
             }
 #endif
 
+            mSnapshotLoadBoxedInstance2ContextId.clear();
             mSnapshotState = SnapshotState::Normal;
         }
         GFXSTREAM_DEBUG("VulkanSnapshots load (end)");
@@ -980,6 +1002,13 @@ class VkDecoderGlobalState::Impl {
         std::string_view engineName = appInfo.pEngineName ? appInfo.pEngineName : "";
         info.isAngle = (engineName == "ANGLE");
 
+        if (mSnapshotState == SnapshotState::Loading) {
+            info.contextId = mSnapshotLoadBoxedInstance2ContextId[boxed];
+        } else {
+            auto* renderThreadInfo = RenderThreadInfoVk::get();
+            info.contextId = renderThreadInfo->ctx_id;
+        }
+
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mInstanceInfo, *pInstance);
         mInstanceInfo[*pInstance] = info;
 
@@ -987,7 +1016,7 @@ class VkDecoderGlobalState::Impl {
 
         if (vkCleanupEnabled()) {
             m_vkEmulation->getCallbacks().registerProcessCleanupCallback(
-                unbox_VkInstance(boxed), [this, boxed] {
+                unbox_VkInstance(boxed), info.contextId, [this, boxed] {
                     if (snapshotsEnabled()) {
                         snapshot()->vkDestroyInstance(nullptr, nullptr, nullptr, 0, boxed, nullptr);
                     }
@@ -1210,7 +1239,6 @@ class VkDecoderGlobalState::Impl {
         pFeatures->textureCompressionASTC_LDR |= enableEmulatedAstcLocked(physicalDevice, vk);
 
         if (mDisableSparseBindingSupport && pFeatures->sparseBinding) {
-            GFXSTREAM_INFO("Disabling sparse binding feature support");
             pFeatures->sparseBinding = VK_FALSE;
             pFeatures->sparseResidencyBuffer = VK_FALSE;
             pFeatures->sparseResidencyImage2D = VK_FALSE;
@@ -1314,7 +1342,6 @@ class VkDecoderGlobalState::Impl {
         }
 
         if (mDisableSparseBindingSupport && pFeatures->features.sparseBinding) {
-            GFXSTREAM_INFO("Disabling sparse binding feature support");
             pFeatures->features.sparseBinding = VK_FALSE;
             pFeatures->features.sparseResidencyBuffer = VK_FALSE;
             pFeatures->features.sparseResidencyImage2D = VK_FALSE;
@@ -5088,16 +5115,25 @@ class VkDecoderGlobalState::Impl {
         }
     }
 
-    inline void convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier(
-        VkBufferMemoryBarrier* barrier) {
-        convertQueueFamilyForeignToExternal(&barrier->srcQueueFamilyIndex);
-        convertQueueFamilyForeignToExternal(&barrier->dstQueueFamilyIndex);
+    void convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier(
+        VkBufferMemoryBarrier& barrier) {
+        convertQueueFamilyForeignToExternal(&barrier.srcQueueFamilyIndex);
+        convertQueueFamilyForeignToExternal(&barrier.dstQueueFamilyIndex);
     }
-
-    inline void convertQueueFamilyForeignToExternal_VkImageMemoryBarrier(
-        VkImageMemoryBarrier* barrier) {
-        convertQueueFamilyForeignToExternal(&barrier->srcQueueFamilyIndex);
-        convertQueueFamilyForeignToExternal(&barrier->dstQueueFamilyIndex);
+    void convertQueueFamilyForeignToExternal_VkImageMemoryBarrier(
+        VkImageMemoryBarrier& barrier) {
+        convertQueueFamilyForeignToExternal(&barrier.srcQueueFamilyIndex);
+        convertQueueFamilyForeignToExternal(&barrier.dstQueueFamilyIndex);
+    }
+    void convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier2(
+        VkBufferMemoryBarrier2& barrier) {
+        convertQueueFamilyForeignToExternal(&barrier.srcQueueFamilyIndex);
+        convertQueueFamilyForeignToExternal(&barrier.dstQueueFamilyIndex);
+    }
+    void convertQueueFamilyForeignToExternal_VkImageMemoryBarrier2(
+        VkImageMemoryBarrier2& barrier) {
+        convertQueueFamilyForeignToExternal(&barrier.srcQueueFamilyIndex);
+        convertQueueFamilyForeignToExternal(&barrier.dstQueueFamilyIndex);
     }
 
     inline VkImage getIMBImage(const VkImageMemoryBarrier& imb) { return imb.image; }
@@ -5160,13 +5196,11 @@ class VkDecoderGlobalState::Impl {
         auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
 
         for (uint32_t i = 0; i < bufferMemoryBarrierCount; ++i) {
-            convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier(
-                ((VkBufferMemoryBarrier*)pBufferMemoryBarriers) + i);
+            convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier(const_cast<VkBufferMemoryBarrier&>(pBufferMemoryBarriers[i]));
         }
 
         for (uint32_t i = 0; i < imageMemoryBarrierCount; ++i) {
-            convertQueueFamilyForeignToExternal_VkImageMemoryBarrier(
-                ((VkImageMemoryBarrier*)pImageMemoryBarriers) + i);
+            convertQueueFamilyForeignToExternal_VkImageMemoryBarrier(const_cast<VkImageMemoryBarrier&>(pImageMemoryBarriers[i]));
         }
 
         if (imageMemoryBarrierCount == 0) {
@@ -5245,13 +5279,11 @@ class VkDecoderGlobalState::Impl {
         auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
 
         for (uint32_t i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; ++i) {
-            convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier(
-                ((VkBufferMemoryBarrier*)pDependencyInfo->pBufferMemoryBarriers) + i);
+            convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier2(const_cast<VkBufferMemoryBarrier2&>(pDependencyInfo->pBufferMemoryBarriers[i]));
         }
 
         for (uint32_t i = 0; i < pDependencyInfo->imageMemoryBarrierCount; ++i) {
-            convertQueueFamilyForeignToExternal_VkImageMemoryBarrier(
-                ((VkImageMemoryBarrier*)pDependencyInfo->pImageMemoryBarriers) + i);
+            convertQueueFamilyForeignToExternal_VkImageMemoryBarrier2(const_cast<VkImageMemoryBarrier2&>(pDependencyInfo->pImageMemoryBarriers[i]));
         }
 
         std::lock_guard<std::mutex> lock(mMutex);
@@ -5311,7 +5343,7 @@ class VkDecoderGlobalState::Impl {
         }
 
         if (!mUseOldMemoryCleanupPath) {
-            get_emugl_address_space_device_control_ops().register_deallocation_callback(
+            get_gfxstream_address_space_ops().register_deallocation_callback(
                 (void*)(new uint64_t(sizeToPage)), gpa, [](void* thisPtr, uint64_t gpa) {
                     uint64_t* sizePtr = (uint64_t*)thisPtr;
                     get_gfxstream_vm_operations().unmap_user_memory(gpa, *sizePtr);
@@ -6681,9 +6713,16 @@ class VkDecoderGlobalState::Impl {
 
         std::unordered_set<HandleType> acquiredColorBuffers;
         std::unordered_set<HandleType> releasedColorBuffers;
-        if (!m_vkEmulation->getFeatures().GuestVulkanOnly.enabled) {
-            {
-                std::lock_guard<std::mutex> lock(mMutex);
+        VkDevice device = VK_NULL_HANDLE;
+        std::mutex* queueMutex = nullptr;
+        PhysicalQueuePendingOps* pendingOps = nullptr;
+        bool sharedQueue = false;
+        DeviceOpTracker* deviceOpTracker = nullptr;
+
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+
+            if (!m_vkEmulation->getFeatures().GuestVulkanOnly.enabled) {
                 for (uint32_t i = 0; i < submitCount; i++) {
                     for (int j = 0; j < getCommandBufferCount(pSubmits[i]); j++) {
                         VkCommandBuffer cmdBuffer = getCommandBuffer(pSubmits[i], j);
@@ -6720,18 +6759,6 @@ class VkDecoderGlobalState::Impl {
                 }
             }
 
-            for (HandleType cb : acquiredColorBuffers) {
-                m_vkEmulation->getCallbacks().invalidateColorBuffer(cb);
-            }
-        }
-
-        VkDevice device = VK_NULL_HANDLE;
-        std::mutex* queueMutex = nullptr;
-        PhysicalQueuePendingOps* pendingOps = nullptr;
-        bool sharedQueue = false;
-
-        {
-            std::lock_guard<std::mutex> lock(mMutex);
             auto* queueInfo = android::base::find(mQueueInfo, queue);
             if (!queueInfo) {
                 GFXSTREAM_ERROR("vkQueueSubmit cannot find queue info for %p", queue);
@@ -6741,83 +6768,82 @@ class VkDecoderGlobalState::Impl {
             queueMutex = queueInfo->queueMutex.get();
             pendingOps = queueInfo->pendingOps.get();
             sharedQueue = queueInfo->usingSharedPhysicalQueue;
+
+            auto* deviceInfo = android::base::find(mDeviceInfo, device);
+            if (!deviceInfo) {
+                GFXSTREAM_ERROR("vkQueueSubmit cannot find device info for %p", device);
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
+
+            deviceOpTracker = deviceInfo->deviceOpTracker.get();
         }
 
-        // Unsafe to release when snapshot enabled.
-        // Snapshot load might fail to find the shader modules if we release them here.
-        if (!snapshotsEnabled()) {
-            processDelayedRemovesForDevice(device);
+        for (HandleType cb : acquiredColorBuffers) {
+            m_vkEmulation->getCallbacks().invalidateColorBuffer(cb);
         }
 
         VkFence usedFence = fence;
-        DeviceOpWaitable queueCompletedWaitable;
-        {
-            std::lock_guard<std::mutex> lock(mMutex);
-
-            auto* deviceInfo = android::base::find(mDeviceInfo, device);
-            if (!deviceInfo) return VK_ERROR_INITIALIZATION_FAILED;
-            DeviceOpBuilder builder(*deviceInfo->deviceOpTracker);
-
-            if (VK_NULL_HANDLE == usedFence) {
-                // Note: This fence will be managed by the DeviceOpTracker after the
-                // OnQueueSubmittedWithFence call, so it does not need to be destroyed in the scope
-                // of this queueSubmit
-                usedFence = builder.CreateFenceForOp();
-            }
-            queueCompletedWaitable = builder.OnQueueSubmittedWithFence(usedFence);
-
-            deviceInfo->deviceOpTracker->PollAndProcessGarbage();
+        DeviceOpBuilder builder(*deviceOpTracker);
+        if (VK_NULL_HANDLE == usedFence) {
+            // Note: This fence will be managed by the DeviceOpTracker after the
+            // OnQueueSubmittedWithFence call, so it does not need to be destroyed in the scope
+            // of this queueSubmit
+            usedFence = builder.CreateFenceForOp();
         }
-
-#if DEBUG_TIMELINE_SEMAPHORES
-        GFXSTREAM_INFO("%s: on queue=%p, submitCount=%d", __func__, queue, submitCount);
-        for (uint32_t i = 0; i < submitCount; i++) {
-            const auto& s = pSubmits[i];
-            for (uint32_t j = 0; j < getWaitSemaphoreCount(s); j++) {
-                GFXSTREAM_INFO("%s: %p[%d] : waits %p %llu", __func__, queue, i, getWaitSemaphore(s, j),
-                     getWaitSemaphoreValue(s, j));
-            }
-            for (uint32_t j = 0; j < getSignalSemaphoreCount(s); j++) {
-                GFXSTREAM_INFO("%s: %p[%d] : signals %p %llu", __func__, queue, i, getSignalSemaphore(s, j),
-                     getSignalSemaphoreValue(s, j));
-            }
-        }
-#endif
 
         // Dispatch only if it's safe
         const bool canDispatch = safeToSubmit(sharedQueue, submitCount, pSubmits);
 
-        if (canDispatch) {
+        {
             std::lock_guard<std::mutex> queueLock(*queueMutex);
-            auto result = dispatchVkQueueSubmit(vk, queue, submitCount, pSubmits, usedFence);
-            if (result != VK_SUCCESS) {
-                GFXSTREAM_WARNING("dispatchVkQueueSubmit failed: %s [%d]", string_VkResult(result),
-                                  result);
-                return result;
-            }
-        } else {
-            // Special handling of submissions where the signalling will be done later.
-            // (E.g. dEQP-VK.synchronization2.timeline_semaphore.wait_before_signal.*)
-            // When a single physical queue is shared with VulkanVirtualQueue, signal
-            // cannot be processed as the wait operation blocks the queue. Here we defer
-            // the real submission until another queue submission with the necessary
-            // semaphore signaling is made.
-            // We cannot partially send some of the submissions, as that'd break the fence
-            // signalling, so we defer all the operations for this call.
-            // For other post-submit operations, we treat this submissions as if it has been
-            // sent to the GPU, because all the object lifetimes (e.g. semaphores, fences,
-            // command buffers) need to be managed correctly by the app side until actual
-            // GPU operation is started.
-            LOG_CALLS_VERBOSE("Deferring dispatch on queue %p, with fence %p", queue, usedFence);
+            if (canDispatch) {
+                auto result = dispatchVkQueueSubmit(vk, queue, submitCount, pSubmits, usedFence);
+                if (result != VK_SUCCESS) {
+                    GFXSTREAM_WARNING("dispatchVkQueueSubmit failed: %s [%d]", string_VkResult(result),
+                                    result);
+                    return result;
+                }
+            } else {
+                // Special handling of submissions where the signalling will be done later.
+                // (E.g. dEQP-VK.synchronization2.timeline_semaphore.wait_before_signal.*)
+                // When a single physical queue is shared with VulkanVirtualQueue, signal
+                // cannot be processed as the wait operation blocks the queue. Here we defer
+                // the real submission until another queue submission with the necessary
+                // semaphore signaling is made.
+                // We cannot partially send some of the submissions, as that'd break the fence
+                // signalling, so we defer all the operations for this call.
+                // For other post-submit operations, we treat this submissions as if it has been
+                // sent to the GPU, because all the object lifetimes (e.g. semaphores, fences,
+                // command buffers) need to be managed correctly by the app side until actual
+                // GPU operation is started.
+                LOG_CALLS_VERBOSE("Deferring dispatch on queue %p, with fence %p", queue,
+                                  usedFence);
 
-            std::lock_guard<std::mutex> queueLock(*queueMutex);
-            auto result = pendingOps->queuePendingSubmission(submitCount, pSubmits, usedFence);
-            if (result != VK_SUCCESS) {
-                GFXSTREAM_WARNING("dispatchVkQueueSubmit failed: %s [%d]", string_VkResult(result),
-                                  result);
-                return result;
+#if DEBUG_TIMELINE_SEMAPHORES
+                GFXSTREAM_INFO("%s: on queue=%p, submitCount=%d", __func__, queue, submitCount);
+                for (uint32_t i = 0; i < submitCount; i++) {
+                    const auto& s = pSubmits[i];
+                    for (uint32_t j = 0; j < getWaitSemaphoreCount(s); j++) {
+                        GFXSTREAM_INFO("%s: %p[%d] : waits %p %llu", __func__, queue, i,
+                                       getWaitSemaphore(s, j), getWaitSemaphoreValue(s, j));
+                    }
+                    for (uint32_t j = 0; j < getSignalSemaphoreCount(s); j++) {
+                        GFXSTREAM_INFO("%s: %p[%d] : signals %p %llu", __func__, queue, i,
+                                       getSignalSemaphore(s, j), getSignalSemaphoreValue(s, j));
+                    }
+                }
+#endif
+
+                auto result = pendingOps->queuePendingSubmission(submitCount, pSubmits, usedFence);
+                if (result != VK_SUCCESS) {
+                    GFXSTREAM_WARNING("dispatchVkQueueSubmit failed: %s [%d]", string_VkResult(result),
+                                    result);
+                    return result;
+                }
             }
         }
+
+        DeviceOpWaitable queueCompletedWaitable = builder.OnQueueSubmittedWithFence(usedFence);
 
         {
             std::lock_guard<std::mutex> lock(mMutex);
@@ -6897,6 +6923,13 @@ class VkDecoderGlobalState::Impl {
                     "the virtual queue is active.");
             }
         }
+
+        // Unsafe to release when snapshot enabled.
+        // Snapshot load might fail to find the shader modules if we release them here.
+        if (!snapshotsEnabled()) {
+            processDelayedRemovesForDevice(device);
+        }
+        deviceOpTracker->PollAndProcessGarbage();
 
         return VK_SUCCESS;
     }
@@ -9502,6 +9535,8 @@ class VkDecoderGlobalState::Impl {
     // replayed on the "same" RenderThread which originally made the API call so
     // RenderThreadInfoVk::ctx_id is not available.
     std::optional<std::unordered_map<VkDevice, uint32_t>> mSnapshotLoadVkDeviceToVirtioCpuContextId
+        GUARDED_BY(mMutex);
+    std::unordered_map<VkInstance, uint32_t> mSnapshotLoadBoxedInstance2ContextId
         GUARDED_BY(mMutex);
 
     struct LinearImageCreateInfo {
