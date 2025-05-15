@@ -1,5 +1,5 @@
 # Copyright 2025 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 inc_common_base = include_directories('include')
 
@@ -8,17 +8,10 @@ files_lib_common_base = files(
     'CpuTime.cpp',
     'FileUtils.cpp',
     'FunctorThread.cpp',
-    'LayoutResolver.cpp',
-    'MemStream.cpp',
-    'StdioStream.cpp',
     'MessageChannel.cpp',
     'PathUtils.cpp',
-    'ring_buffer.cpp',
     'SharedMemory_posix.cpp',
     'StringFormat.cpp',
-    'Stream.cpp',
-    'StreamSerializing.cpp',
-    'SubAllocator.cpp',
     'System.cpp',
     'Tracing.cpp',
     'Thread_pthread.cpp',

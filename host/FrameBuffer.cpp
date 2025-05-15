@@ -31,12 +31,11 @@
 #include "NativeSubWindow.h"
 #include "RenderThreadInfo.h"
 #include "SyncThread.h"
-#include "gfxstream/LayoutResolver.h"
 #include "gfxstream/Metrics.h"
 #include "gfxstream/SharedLibrary.h"
 #include "gfxstream/Tracing.h"
 #include "gfxstream/containers/Lookup.h"
-#include "aemu/base/files/StreamSerializing.h"
+#include "gfxstream/host/stream_utils.h"
 #include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/system/System.h"
 
@@ -68,7 +67,7 @@ namespace gfxstream {
 
 using gfxstream::base::AutoLock;
 using gfxstream::base::MetricEventVulkanOutOfMemory;
-using android::base::Stream;
+using gfxstream::Stream;
 using gfxstream::base::WorkerProcessingResult;
 using emugl::GfxApiLogger;
 using gfxstream::host::FeatureSet;
@@ -1914,7 +1913,7 @@ template <class Collection>
 static void saveProcOwnedCollection(Stream* stream, const Collection& c) {
     // Exclude empty handle lists from saving as they add no value but only
     // increase the snapshot size; keep the format compatible with
-    // android::base::saveCollection() though.
+    // gfxstream::saveCollection() though.
     const int count = std::count_if(
         c.begin(), c.end(),
         [](const typename Collection::value_type& pair) { return !pair.second.empty(); });

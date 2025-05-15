@@ -1,19 +1,30 @@
+// Copyright 2025 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include "GLSnapshotTestDispatch.h"
 
 #include "FrameBuffer.h"
 #include "GLSnapshotTesting.h"
 #include "GLTestUtils.h"
 #include "RenderThreadInfo.h"
-#include "aemu/base/files/StdioStream.h"
-#include "apigen-codec-common/glUtils.h"
+#include "gfxstream/host/glUtils.h"
 #include "gfxstream/files/PathUtils.h"
 #include "gfxstream/system/System.h"
 #include "render-utils/snapshot_operations.h"
 
 namespace gfxstream {
 namespace gl {
-
-using android::base::StdioStream;
 
 static SnapshotTestDispatch* sSnapshotTestDispatch() {
     static SnapshotTestDispatch* s = new SnapshotTestDispatch;
@@ -47,7 +58,7 @@ void SnapshotTestDispatch::saveSnapshot() {
     }
 
 
-    mStream = std::make_unique<android::base::MemStream>();
+    mStream = std::make_unique<gfxstream::MemStream>();
     mTextureSaverLoader = std::make_shared<InMemoryTextureSaverLoader>();
 
     fb->onSave(mStream.get(), mTextureSaverLoader);
@@ -70,7 +81,7 @@ void SnapshotTestDispatch::loadSnapshot() {
     // unbind so load will destroy previous objects
     fb->bindContext(0, 0, 0);
 
-    android::base::MemStream loadStream(android::base::MemStream::Buffer(mStream->buffer()));
+    gfxstream::MemStream loadStream(gfxstream::MemStream::Buffer(mStream->buffer()));
 
     fb->onLoad(&loadStream, mTextureSaverLoader);
 

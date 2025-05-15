@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 files_lib_composer = files(
   'renderControl_dec.cpp',
@@ -10,8 +10,17 @@ lib_composer = static_library(
   'composer',
   files_lib_composer,
   cpp_args: gfxstream_host_args,
-  include_directories: [inc_gfxstream_include, inc_include, inc_apigen_codec, inc_host_logging,
-                        inc_common_base, inc_host_iostream],
-  link_with: [lib_host_logging, lib_common_base, lib_host_iostream],
-  dependencies: [aemu_common_dep]
+  include_directories: [
+    inc_host_decoder_common,
+    inc_common_base,
+    inc_gfxstream_server,
+    inc_host_iostream,
+    inc_host_logging,
+    inc_include,
+  ],
+  link_with: [
+    lib_common_base,
+    lib_host_iostream,
+    lib_host_logging,
+  ],
 )

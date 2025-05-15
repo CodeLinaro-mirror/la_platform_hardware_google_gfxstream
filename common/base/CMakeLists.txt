@@ -1,3 +1,17 @@
+# Copyright 2025 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 if(WIN32)
     add_subdirectory(windows)
 endif()
@@ -34,16 +48,9 @@ set(gfxstream_common_base_srcs
     CpuTime.cpp
     FileUtils.cpp
     FunctorThread.cpp
-    LayoutResolver.cpp
-    MemStream.cpp
     MessageChannel.cpp
     PathUtils.cpp
-    ring_buffer.cpp
-    StdioStream.cpp
-    Stream.cpp
-    StreamSerializing.cpp
     StringFormat.cpp
-    SubAllocator.cpp
     System.cpp
     Tracing.cpp
     )
@@ -158,17 +165,13 @@ if (ENABLE_VKCEREAL_TESTS)
     add_executable(gfxstream_common_base_unittests
                    AlignedBuf_unittest.cpp
                    ArraySize_unittest.cpp
-                    LayoutResolver_unittest.cpp
-                    LruCache_unittest.cpp
-                    ManagedDescriptor_unittest.cpp
-                    Optional_unittest.cpp
-                    ring_buffer_unittest.cpp
-                    StringFormat_unittest.cpp
-                    SubAllocator_unittest.cpp
-                    TypeTraits_unittest.cpp
-                    WorkerThread_unittest.cpp
-                    HybridEntityManager_unittest.cpp
-                    ${gfxstream_common_base_test_srcs})
+                   LruCache_unittest.cpp
+                   ManagedDescriptor_unittest.cpp
+                   StringFormat_unittest.cpp
+                   TypeTraits_unittest.cpp
+                   WorkerThread_unittest.cpp
+                   HybridEntityManager_unittest.cpp
+                   ${gfxstream_common_base_test_srcs})
 
     target_link_libraries(gfxstream_common_base_unittests
                           PUBLIC

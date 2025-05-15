@@ -1,5 +1,5 @@
 # Copyright 2023 Android Open Source Project
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Forward declared in host/gl/meson.build:
 # inc_gl_openglesdispatch = include_directories('include')
@@ -17,7 +17,18 @@ files_lib_gl_openglesdispatch = files(
 lib_gl_openglesdispatch = static_library(
   'gl_openglesdispatch',
   files_lib_gl_openglesdispatch,
-  include_directories: [inc_gl_openglesdispatch, inc_common_base, inc_gfxstream_include, inc_include],
+  include_directories: [
+    inc_common_base,
+    inc_common_opengl,
+    inc_gfxstream_include,
+    inc_gl_openglesdispatch,
+    inc_include,
+  ],
   cpp_args: gfxstream_host_args,
-  link_with: [lib_egl_translator, lib_glescm_translator, lib_glesv2_translator, lib_common_base]
+  link_with: [
+    lib_common_base,
+    lib_egl_translator,
+    lib_glescm_translator,
+    lib_glesv2_translator,
+  ],
 )
