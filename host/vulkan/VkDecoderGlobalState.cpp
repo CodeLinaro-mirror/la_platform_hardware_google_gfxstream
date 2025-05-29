@@ -44,11 +44,11 @@
 #include "common/goldfish_vk_reserved_marshaling.h"
 #include "gfxstream/host/AstcCpuDecompressor.h"
 #include "gfxstream/containers/Lookup.h"
+#include "gfxstream/host/RenderDoc.h"
 #include "gfxstream/host/Tracing.h"
-#include "gfxstream/host/logging.h"
+#include "gfxstream/common/logging.h"
 #include "gfxstream/host/address_space_operations.h"
 #include "gfxstream/host/vm_operations.h"
-#include "utils/RenderDoc.h"
 #include "vk_util.h"
 #include "vulkan/emulated_textures/AstcTexture.h"
 #include "vulkan/emulated_textures/CompressedImageInfo.h"
@@ -86,7 +86,7 @@ using gfxstream::base::MetricEventVulkanOutOfMemory;
 using gfxstream::base::Optional;
 using gfxstream::base::SharedMemory;
 using gfxstream::base::StaticLock;
-using emugl::GfxApiLogger;
+using gfxstream::host::GfxApiLogger;
 using gfxstream::ExternalObjectManager;
 using gfxstream::VulkanInfo;
 
@@ -233,8 +233,6 @@ class VkDecoderGlobalState::Impl {
         mSamplerInfo.clear();
         mCommandBufferInfo.clear();
         mCommandPoolInfo.clear();
-        mDeviceToPhysicalDevice.clear();
-        mPhysicalDeviceToInstance.clear();
         mQueueInfo.clear();
         mBufferInfo.clear();
         mMemoryInfo.clear();
@@ -1031,11 +1029,10 @@ class VkDecoderGlobalState::Impl {
         {
             std::lock_guard<std::mutex> lock(mMutex);
 
-            for (auto it : mDeviceToPhysicalDevice) {
-                auto* otherInstance = gfxstream::base::find(mPhysicalDeviceToInstance, it.second);
-                if (!otherInstance) continue;
-                if (instance == *otherInstance) {
-                    devicesToDestroy.push_back(it.first);
+            for (const auto& [device, deviceInfo] : mDeviceInfo) {
+                auto* physDevInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo.physicalDevice);
+                if (physDevInfo && instance == physDevInfo->instance) {
+                    devicesToDestroy.push_back(device);
                 }
             }
         }
@@ -1170,8 +1167,6 @@ class VkDecoderGlobalState::Impl {
         if (pPhysicalDeviceCount && pPhysicalDevices) {
             // Box them up
             for (uint32_t i = 0; i < std::min(requestedCount, availableCount); ++i) {
-                VALIDATE_NEW_HANDLE_INFO_ENTRY(mPhysicalDeviceToInstance, physicalDevices[i]);
-                mPhysicalDeviceToInstance[physicalDevices[i]] = instance;
                 VALIDATE_NEW_HANDLE_INFO_ENTRY(mPhysdevInfo, physicalDevices[i]);
                 auto& physdevInfo = mPhysdevInfo[physicalDevices[i]];
                 physdevInfo.instance = instance;
@@ -1255,14 +1250,13 @@ class VkDecoderGlobalState::Impl {
         auto* physdevInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) return;
 
-        auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
         if (!instanceInfo) return;
 
         if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
             physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
             vk->vkGetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
-        } else if (hasInstanceExtension(instance,
+        } else if (hasInstanceExtension(physdevInfo->instance,
                                         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
             vk->vkGetPhysicalDeviceFeatures2KHR(physicalDevice, pFeatures);
         } else {
@@ -1292,37 +1286,52 @@ class VkDecoderGlobalState::Impl {
 
         // Disable a set of Vulkan features if BypassVulkanDeviceFeatureOverrides is NOT enabled.
         if (!m_vkEmulation->getFeatures().BypassVulkanDeviceFeatureOverrides.enabled) {
+            VkPhysicalDeviceVulkan11Features* vk11Features =
+                vk_find_struct<VkPhysicalDeviceVulkan11Features>(pFeatures);
+            VkPhysicalDeviceVulkan12Features* vk12Features =
+                vk_find_struct<VkPhysicalDeviceVulkan12Features>(pFeatures);
+            VkPhysicalDeviceVulkan13Features* vulkan13Features =
+                vk_find_struct<VkPhysicalDeviceVulkan13Features>(pFeatures);
+
+            // Protected memory is not supported on emulators. Override feature
+            // information to mark as unsupported (see b/329845987).
             VkPhysicalDeviceProtectedMemoryFeatures* protectedMemoryFeatures =
                 vk_find_struct<VkPhysicalDeviceProtectedMemoryFeatures>(pFeatures);
             if (protectedMemoryFeatures != nullptr) {
-                // Protected memory is not supported on emulators. Override feature
-                // information to mark as unsupported (see b/329845987).
                 protectedMemoryFeatures->protectedMemory = VK_FALSE;
             }
-            VkPhysicalDeviceVulkan11Features* vk11Features =
-                vk_find_struct<VkPhysicalDeviceVulkan11Features>(pFeatures);
             if (vk11Features != nullptr) {
                 vk11Features->protectedMemory = VK_FALSE;
             }
 
+            // TODO(b/398986781) Issues with signal-after-wait when the virtual queue is enabled
+            // Test: dEQP-VK.synchronization.timeline_semaphore.wait_before_signal.*
+            if (m_vkEmulation->getFeatures().VulkanVirtualQueue.enabled) {
+                VkPhysicalDeviceTimelineSemaphoreFeaturesKHR* timelineSemaphoreFeatures =
+                    vk_find_struct<VkPhysicalDeviceTimelineSemaphoreFeaturesKHR>(pFeatures);
+                if (timelineSemaphoreFeatures) {
+                    timelineSemaphoreFeatures->timelineSemaphore = VK_FALSE;
+                }
+                if (vk12Features != nullptr) {
+                    vk12Features->timelineSemaphore = VK_FALSE;
+                }
+            }
+
+            // Private data from the guest side is not currently supported and causes emulator
+            // crashes with the dEQP-VK.api.object_management.private_data tests (b/368009403).
             VkPhysicalDevicePrivateDataFeatures* privateDataFeatures =
                 vk_find_struct<VkPhysicalDevicePrivateDataFeatures>(pFeatures);
             if (privateDataFeatures != nullptr) {
-                // Private data from the guest side is not currently supported and causes emulator
-                // crashes with the dEQP-VK.api.object_management.private_data tests (b/368009403).
                 privateDataFeatures->privateData = VK_FALSE;
             }
-
-            VkPhysicalDeviceVulkan13Features* vulkan13Features =
-                vk_find_struct<VkPhysicalDeviceVulkan13Features>(pFeatures);
             if (vulkan13Features != nullptr) {
                 vulkan13Features->privateData = VK_FALSE;
             }
 
             if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
                 // Currently not supporting iub due to descriptor set optimization.
-                // TODO: fix the non-optimized descriptor set path and re-enable the features afterwads.
-                // b/372217918
+                // TODO: fix the non-optimized descriptor set path and re-enable the features
+                // afterwads. b/372217918
                 VkPhysicalDeviceInlineUniformBlockFeatures* iubFeatures =
                     vk_find_struct<VkPhysicalDeviceInlineUniformBlockFeatures>(pFeatures);
                 if (iubFeatures != nullptr) {
@@ -1411,18 +1420,16 @@ class VkDecoderGlobalState::Impl {
             const_cast<VkPhysicalDeviceExternalImageFormatInfo*>(extImageFormatInfo)->handleType =
                 m_vkEmulation->getDefaultExternalMemoryHandleType();
         }
+        VkResult res = VK_ERROR_INITIALIZATION_FAILED;
 
         std::lock_guard<std::mutex> lock(mMutex);
 
         auto* physdevInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) {
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
+            return res;
         }
 
-        VkResult res = VK_ERROR_INITIALIZATION_FAILED;
-
-        auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
         if (!instanceInfo) {
             return res;
         }
@@ -1431,7 +1438,7 @@ class VkDecoderGlobalState::Impl {
             physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
             res = vk->vkGetPhysicalDeviceImageFormatProperties2(physicalDevice, pImageFormatInfo,
                                                                 pImageFormatProperties);
-        } else if (hasInstanceExtension(instance,
+        } else if (hasInstanceExtension(physdevInfo->instance,
                                         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
             res = vk->vkGetPhysicalDeviceImageFormatProperties2KHR(physicalDevice, pImageFormatInfo,
                                                                    pImageFormatProperties);
@@ -1511,15 +1518,14 @@ class VkDecoderGlobalState::Impl {
             auto* physdevInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
             if (!physdevInfo) return;
 
-            auto instance = mPhysicalDeviceToInstance[physicalDevice];
-            auto* instanceInfo = gfxstream::base::find(mInstanceInfo, instance);
+            auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
             if (!instanceInfo) return;
 
             if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
                 physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
                 func = WhichFunc::kGetPhysicalDeviceFormatProperties2;
             } else if (hasInstanceExtension(
-                           instance, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+                           physdevInfo->instance, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
                 func = WhichFunc::kGetPhysicalDeviceFormatProperties2KHR;
             }
         }
@@ -1591,14 +1597,13 @@ class VkDecoderGlobalState::Impl {
         auto* physdevInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) return;
 
-        auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
         if (!instanceInfo) return;
 
         if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
             physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
             vk->vkGetPhysicalDeviceProperties2(physicalDevice, pProperties);
-        } else if (hasInstanceExtension(instance,
+        } else if (hasInstanceExtension(physdevInfo->instance,
                                         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
             vk->vkGetPhysicalDeviceProperties2KHR(physicalDevice, pProperties);
         } else {
@@ -1719,14 +1724,13 @@ class VkDecoderGlobalState::Impl {
         auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
         if (!physicalDeviceInfo) return;
 
-        auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physicalDeviceInfo->instance);
         if (!instanceInfo) return;
 
         if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
             physicalDeviceInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
             vk->vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
-        } else if (hasInstanceExtension(instance,
+        } else if (hasInstanceExtension(physicalDeviceInfo->instance,
                                         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
             vk->vkGetPhysicalDeviceMemoryProperties2KHR(physicalDevice, pMemoryProperties);
         } else {
@@ -1882,10 +1886,19 @@ class VkDecoderGlobalState::Impl {
             if (privateDataFeatures != nullptr) {
                 privateDataFeatures->privateData = VK_TRUE;
             } else {
-                // Insert into device create info chain
-                forceEnablePrivateData.pNext = const_cast<void*>(createInfoFiltered.pNext);
-                createInfoFiltered.pNext = &forceEnablePrivateData;
-                privateDataFeatures = &forceEnablePrivateData;
+                VkPhysicalDeviceVulkan13Features* vkPhysicalDeviceVulkan13Features =
+                    vk_find_struct<VkPhysicalDeviceVulkan13Features>(&createInfoFiltered);
+                if (vkPhysicalDeviceVulkan13Features == nullptr) {
+                    // Insert into device create info chain
+                    forceEnablePrivateData.pNext = const_cast<void*>(createInfoFiltered.pNext);
+                    createInfoFiltered.pNext = &forceEnablePrivateData;
+                    privateDataFeatures = &forceEnablePrivateData;
+                } else {
+                    // Attempted to add VkPhysicalDevicePrivateDataFeatures but
+                    // VkPhysicalDeviceVulkan13Features is already present which will result in
+                    // a spec violation
+                    vkPhysicalDeviceVulkan13Features->privateData = VK_TRUE;
+                }
             }
         }
 
@@ -2086,8 +2099,6 @@ class VkDecoderGlobalState::Impl {
             return result;
         }
 
-        mDeviceToPhysicalDevice[*pDevice] = physicalDevice;
-
         auto physicalDeviceInfoIt = mPhysdevInfo.find(physicalDevice);
         if (physicalDeviceInfoIt == mPhysdevInfo.end()) return VK_ERROR_INITIALIZATION_FAILED;
         auto& physicalDeviceInfo = physicalDeviceInfoIt->second;
@@ -2114,6 +2125,22 @@ class VkDecoderGlobalState::Impl {
             static_cast<VkExternalFenceHandleTypeFlagBits>(supportedFenceHandleTypes);
         deviceInfo.externalFenceInfo.supportedBinarySemaphoreHandleTypes =
             static_cast<VkExternalSemaphoreHandleTypeFlagBits>(supportedBinarySemaphoreHandleTypes);
+
+#ifdef _WIN32
+        // Use vkGetMemoryWin32HandleKHR
+        deviceInfo.getMemoryHandleFunc = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
+            vk->vkGetDeviceProcAddr(*pDevice, "vkGetMemoryWin32HandleKHR"));
+        if (!deviceInfo.getMemoryHandleFunc) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+#elif __linux__
+        // Use vkGetMemoryFdKHR
+        deviceInfo.getMemoryHandleFunc = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+            vk->vkGetDeviceProcAddr(*pDevice, "vkGetMemoryFdKHR"));
+        if (!deviceInfo.getMemoryHandleFunc) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+#endif
 
         GFXSTREAM_INFO(
             "Created VkDevice:%p for application:%s engine:%s ASTC emulation:%s CPU decoding:%s.",
@@ -2336,6 +2363,7 @@ class VkDecoderGlobalState::Impl {
         return vk->vkGetPhysicalDeviceSparseImageFormatProperties(
             physicalDevice, format, type, samples, usage, tiling, pPropertyCount, pProperties);
     }
+
     void on_vkGetPhysicalDeviceSparseImageFormatProperties2(
         gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
         VkPhysicalDevice boxed_physicalDevice,
@@ -2348,9 +2376,10 @@ class VkDecoderGlobalState::Impl {
 
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
-        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2(
-            physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2(physicalDevice, pFormatInfo,
+                                                                   pPropertyCount, pProperties);
     }
+
     void on_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
         gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo,
         VkPhysicalDevice boxed_physicalDevice,
@@ -2363,8 +2392,76 @@ class VkDecoderGlobalState::Impl {
 
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
-        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
-            physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        return vk->vkGetPhysicalDeviceSparseImageFormatProperties2KHR(physicalDevice, pFormatInfo,
+                                                                      pPropertyCount, pProperties);
+    }
+
+    void on_vkGetDeviceImageMemoryRequirements(gfxstream::base::BumpPool* pool,
+                                               VkSnapshotApiCallInfo* snapshotInfo,
+                                               VkDevice boxed_device,
+                                               const VkDeviceImageMemoryRequirements* pInfo,
+                                               VkMemoryRequirements2* pMemoryRequirements) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto vk = dispatch_VkDevice(boxed_device);
+
+        if (vk->vkGetDeviceImageMemoryRequirements) {
+            vk->vkGetDeviceImageMemoryRequirements(device, pInfo, pMemoryRequirements);
+        } else if (vk->vkGetDeviceImageMemoryRequirementsKHR) {
+            vk->vkGetDeviceImageMemoryRequirementsKHR(device, pInfo, pMemoryRequirements);
+        } else {
+            GFXSTREAM_FATAL("%s: function implementation cannot be found!");
+        }
+
+        const VkFormat format = pInfo->pCreateInfo->format;
+        bool needDecompression = gfxstream::vk::isEtc2(format) || gfxstream::vk::isAstc(format);
+        if (!needDecompression) {
+            // No modifications needed
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mMutex);
+
+        auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+        if (!deviceInfo) {
+            GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
+            return;
+        }
+
+        needDecompression = deviceInfo->needEmulatedDecompression(format);
+        if (!needDecompression) {
+            // No modifications needed
+            return;
+        }
+
+        // Create CompressedImageInfo on the fly to get requirements to use when creating the image
+        CompressedImageInfo cmpInfo =
+            CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
+        {
+            VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
+            VkImage tempImage;
+            VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
+            if (createRes != VK_SUCCESS) {
+                GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
+                return;
+            }
+
+            cmpInfo.setOutputImage(tempImage);
+            cmpInfo.createCompressedMipmapImages(vk, decompInfo);
+        }
+
+        pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
+        cmpInfo.destroy(vk);
+
+        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
+        if (!physicalDeviceInfo) {
+            GFXSTREAM_ERROR("Failed to find physical device info for physical device:%p",
+                            deviceInfo->physicalDevice);
+            return;
+        }
+
+        auto& physicalDeviceMemHelper = physicalDeviceInfo->memoryPropertiesHelper;
+        physicalDeviceMemHelper->transformToGuestMemoryRequirements(
+            &pMemoryRequirements->memoryRequirements);
     }
 
     void destroyDeviceWithExclusiveInfo(VkDevice device, DeviceInfo& deviceInfo,
@@ -2432,7 +2529,6 @@ class VkDecoderGlobalState::Impl {
         destroyDeviceObjects(deviceObjects);
 
         mDeviceInfo.erase(device);
-        mDeviceToPhysicalDevice.erase(device);
     }
 
     void on_vkDestroyDevice(gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo*,
@@ -2665,12 +2761,7 @@ class VkDecoderGlobalState::Impl {
         VkResult createRes = VK_SUCCESS;
 
         if (nativeBufferANDROID) {
-            auto* physicalDevice = gfxstream::base::find(mDeviceToPhysicalDevice, device);
-            if (!physicalDevice) {
-                return VK_ERROR_DEVICE_LOST;
-            }
-
-            auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, *physicalDevice);
+            auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
             if (!physicalDeviceInfo) {
                 return VK_ERROR_DEVICE_LOST;
             }
@@ -4808,16 +4899,16 @@ class VkDecoderGlobalState::Impl {
         std::lock_guard<std::mutex> lock(mMutex);
         updateImageMemorySizeLocked(device, image, pMemoryRequirements);
 
-        auto* physicalDevice = gfxstream::base::find(mDeviceToPhysicalDevice, device);
-        if (!physicalDevice) {
-            GFXSTREAM_ERROR("Failed to find physical device for device:%p", device);
+        auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+        if (!deviceInfo) {
+            GFXSTREAM_ERROR("Failed to find device info for device: %p", device);
             return;
         }
 
-        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, *physicalDevice);
+        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
         if (!physicalDeviceInfo) {
-            GFXSTREAM_ERROR("Failed to find physical device info for physical device:%p",
-                            *physicalDevice);
+            GFXSTREAM_ERROR("Failed to find physical device info for physical device: %p",
+                            deviceInfo->physicalDevice);
             return;
         }
 
@@ -4834,16 +4925,16 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::mutex> lock(mMutex);
 
-        auto* physicalDevice = gfxstream::base::find(mDeviceToPhysicalDevice, device);
-        if (!physicalDevice) {
-            GFXSTREAM_ERROR("Failed to find physical device for device:%p", device);
+        auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+        if (!deviceInfo) {
+            GFXSTREAM_ERROR("Failed to find device info for device: %p", device);
             return;
         }
 
-        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, *physicalDevice);
+        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
         if (!physicalDeviceInfo) {
-            GFXSTREAM_ERROR("Failed to find physical device info for physical device:%p",
-                            *physicalDevice);
+            GFXSTREAM_ERROR("Failed to find physical device info for physical device: %p",
+                            deviceInfo->physicalDevice);
             return;
         }
 
@@ -4879,14 +4970,15 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::mutex> lock(mMutex);
 
-        auto* physicalDevice = gfxstream::base::find(mDeviceToPhysicalDevice, device);
-        if (!physicalDevice) {
-            GFXSTREAM_FATAL("No physical device available for VkDevice:%p", device);
+        auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+        if (!deviceInfo) {
+            GFXSTREAM_FATAL("Failed to find device info for device: %p", device);
         }
 
-        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, *physicalDevice);
+        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
         if (!physicalDeviceInfo) {
-            GFXSTREAM_FATAL("No physical device info available for VkPhysicalDevice:%p", *physicalDevice);
+            GFXSTREAM_FATAL("No physical device info available for VkPhysicalDevice: %p",
+                            deviceInfo->physicalDevice);
         }
 
         auto& physicalDeviceMemHelper = physicalDeviceInfo->memoryPropertiesHelper;
@@ -4902,14 +4994,15 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::mutex> lock(mMutex);
 
-        auto* physicalDevice = gfxstream::base::find(mDeviceToPhysicalDevice, device);
-        if (!physicalDevice) {
-            GFXSTREAM_FATAL("No physical device available for VkDevice:%p", device);
+        auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+        if (!deviceInfo) {
+            GFXSTREAM_ERROR("Failed to find device info for device: %p", device);
+            return;
         }
 
-        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, *physicalDevice);
+        auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
         if (!physicalDeviceInfo) {
-            GFXSTREAM_FATAL("No available for VkPhysicalDevice:%p", *physicalDevice);
+            GFXSTREAM_FATAL("No available for VkPhysicalDevice:%p", deviceInfo->physicalDevice);
         }
 
         if ((physicalDeviceInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) &&
@@ -5666,15 +5759,17 @@ class VkDecoderGlobalState::Impl {
         {
             std::lock_guard<std::mutex> lock(mMutex);
 
-            auto* physicalDevice = gfxstream::base::find(mDeviceToPhysicalDevice, device);
-            if (!physicalDevice) {
+            auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+            if (!deviceInfo) {
                 // User app gave an invalid VkDevice, but we don't really want to crash here.
                 // We should allow invalid apps.
+                GFXSTREAM_ERROR("Failed to find device info for device: %p", device);
                 return VK_ERROR_DEVICE_LOST;
             }
-            auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, *physicalDevice);
+
+            auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
             if (!physicalDeviceInfo) {
-                GFXSTREAM_FATAL("No info available for VkPhysicalDevice:%p", *physicalDevice);
+                GFXSTREAM_FATAL("No info available for VkPhysicalDevice:%p", deviceInfo->physicalDevice);
             }
 
             deviceHasDmabufExt =
@@ -6196,9 +6291,12 @@ class VkDecoderGlobalState::Impl {
         if (!queueInfo) return VK_ERROR_INITIALIZATION_FAILED;
 
         if (mRenderDocWithMultipleVkInstances) {
-            VkPhysicalDevice vkPhysicalDevice = mDeviceToPhysicalDevice.at(queueInfo->device);
-            VkInstance vkInstance = mPhysicalDeviceToInstance.at(vkPhysicalDevice);
-            mRenderDocWithMultipleVkInstances->onFrameDelimiter(vkInstance);
+            auto* deviceInfo = gfxstream::base::find(mDeviceInfo, queueInfo->device);
+            if (!deviceInfo) return VK_ERROR_INITIALIZATION_FAILED;
+
+            auto* phyDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
+            if (!phyDeviceInfo) return VK_ERROR_INITIALIZATION_FAILED;
+            mRenderDocWithMultipleVkInstances->onFrameDelimiter(phyDeviceInfo->instance);
         }
 
         auto* imageInfo = gfxstream::base::find(mImageInfo, image);
@@ -6268,6 +6366,9 @@ class VkDecoderGlobalState::Impl {
         auto* info = gfxstream::base::find(mMemoryInfo, memory);
         if (!info) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+        auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+        if (!info) return VK_ERROR_OUT_OF_HOST_MEMORY;
+
         hostBlobId = (info->blobId && !hostBlobId) ? info->blobId : hostBlobId;
 
         if (m_vkEmulation->getFeatures().SystemBlob.enabled && info->sharedMemory.has_value()) {
@@ -6306,7 +6407,7 @@ class VkDecoderGlobalState::Impl {
                 info->needUnmap = true;
             }
 
-            auto exportedMemoryOpt = m_vkEmulation->exportMemoryHandle(device, memory);
+            auto exportedMemoryOpt = exportMemoryHandle(deviceInfo, vk, device, memory);
             if (!exportedMemoryOpt) {
                 return VK_ERROR_OUT_OF_HOST_MEMORY;
             }
@@ -6901,15 +7002,15 @@ class VkDecoderGlobalState::Impl {
             // finish the after-dispatch operations. vkWaitForFences is skipped, as it can deadlock.
             if (canDispatch) {
                 VkResult result =
-                    vk->vkWaitForFences(device, 1, &usedFence, VK_TRUE, /* 1 sec */ 1000000000L);
+                    vk->vkWaitForFences(device, 1, &usedFence, VK_TRUE, /* 5 sec */ 5000000000L);
                 if (result != VK_SUCCESS) {
-                    GFXSTREAM_ERROR("vkWaitForFences failed: %s [%d]", string_VkResult(result),
-                                    result);
-                    return result;
-                }
-
-                for (HandleType cb : releasedColorBuffers) {
-                    m_vkEmulation->getCallbacks().flushColorBuffer(cb);
+                    // This may cause presentation issues, but no need to return a failure
+                    GFXSTREAM_ERROR("Cannot sync colorbuffers, vkWaitForFences failed: %s [%d]",
+                                    string_VkResult(result), result);
+                } else {
+                    for (HandleType cb : releasedColorBuffers) {
+                        m_vkEmulation->getCallbacks().flushColorBuffer(cb);
+                    }
                 }
             } else {
                 GFXSTREAM_ERROR(
@@ -8565,7 +8666,7 @@ class VkDecoderGlobalState::Impl {
                                                       VkImageTiling tiling, VkImageUsageFlags usage,
                                                       VkImageCreateFlags flags) {
         // BUG: 139193497
-        return !(usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && !(type == VK_IMAGE_TYPE_1D);
+        return !(usage & VK_IMAGE_USAGE_STORAGE_BIT) && !(usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && !(type == VK_IMAGE_TYPE_1D);
     }
 
     std::vector<const char*> filteredDeviceExtensionNames(VulkanDispatch* vk,
@@ -8741,9 +8842,9 @@ class VkDecoderGlobalState::Impl {
     // Whether the VkInstance associated with this physical device was created by ANGLE
     bool isAngleInstanceLocked(VkPhysicalDevice physicalDevice, VulkanDispatch* vk)
         REQUIRES(mMutex) {
-        VkInstance* instance = gfxstream::base::find(mPhysicalDeviceToInstance, physicalDevice);
-        if (!instance) return false;
-        InstanceInfo* instanceInfo = gfxstream::base::find(mInstanceInfo, *instance);
+        auto* physDevInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
+        if (!physDevInfo) return false;
+        auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physDevInfo->instance);
         if (!instanceInfo) return false;
         return instanceInfo->isAngle;
     }
@@ -8828,6 +8929,57 @@ class VkDecoderGlobalState::Impl {
         }
     }
 
+    std::optional<GenericDescriptorInfo> exportMemoryHandle(struct DeviceInfo* deviceInfo,
+                                                            VulkanDispatch* vk, VkDevice device,
+                                                            VkDeviceMemory memory) {
+        GenericDescriptorInfo ret;
+
+#if defined(__unix__)
+        VkMemoryGetFdInfoKHR memoryGetFdInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+            .pNext = nullptr,
+            .memory = memory,
+            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+        };
+        ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_FD;
+
+#if defined(__linux__)
+        if (m_vkEmulation->supportsDmaBuf()) {
+            memoryGetFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+            ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_DMABUF;
+        }
+#endif
+
+        int fd = -1;
+        if (deviceInfo->getMemoryHandleFunc(device, &memoryGetFdInfo, &fd) != VK_SUCCESS) {
+            return std::nullopt;
+        };
+
+        ret.descriptor = ManagedDescriptor(fd);
+
+#elif defined(_WIN32)
+        VkMemoryGetWin32HandleInfoKHR memoryGetHandleInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR,
+            .pNext = nullptr,
+            .memory = memory,
+            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT,
+        };
+        ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_WIN32;
+
+        HANDLE handle;
+        if (deviceInfo->getMemoryHandleFunc(device, &memoryGetHandleInfo, &handle) != VK_SUCCESS) {
+            return std::nullopt;
+        }
+
+        ret.descriptor = ManagedDescriptor(handle);
+#else
+        GFXSTREAM_ERROR("Unsupported external memory handle type.");
+        return std::nullopt;
+#endif
+
+        return std::move(ret);
+    }
+
     void getSupportedSemaphoreHandleTypes(VulkanDispatch* vk, VkPhysicalDevice physicalDevice,
                                           uint32_t* supportedBinarySemaphoreHandleTypes) {
         if (!m_vkEmulation->supportsExternalSemaphoreCapabilities()) {
@@ -8877,8 +9029,7 @@ class VkDecoderGlobalState::Impl {
                 return false;
             }
 
-            auto instance = mPhysicalDeviceToInstance[physicalDevice];
-            auto* instanceInfo = gfxstream::base::find(mInstanceInfo, instance);
+            auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
             if (!instanceInfo) {
                 return false;
             }
@@ -8886,7 +9037,7 @@ class VkDecoderGlobalState::Impl {
             if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
                 physdevInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
                 hasGetPhysicalDeviceFeatures2 = true;
-            } else if (hasInstanceExtension(instance,
+            } else if (hasInstanceExtension(physdevInfo->instance,
                                             VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
                 hasGetPhysicalDeviceFeatures2KHR = true;
             } else {
@@ -9007,34 +9158,26 @@ class VkDecoderGlobalState::Impl {
 
         objects.instance = mInstanceInfo.extract(instanceInfoIt);
 
-        for (auto [device, physicalDevice] : mDeviceToPhysicalDevice) {
-            auto physicalDeviceInstanceIt = mPhysicalDeviceToInstance.find(physicalDevice);
-            if (physicalDeviceInstanceIt == mPhysicalDeviceToInstance.end()) continue;
-            auto physicalDeviceInstance = physicalDeviceInstanceIt->second;
-
-            if (physicalDeviceInstance != instance) continue;
-
-            auto deviceInfoIt = mDeviceInfo.find(device);
-            if (deviceInfoIt == mDeviceInfo.end()) continue;
-
-            InstanceObjects::DeviceObjects& deviceObjects = objects.devices.emplace_back();
-            deviceObjects.device = mDeviceInfo.extract(deviceInfoIt);
-            extractDeviceAndDependenciesLocked(device, deviceObjects);
+        for (auto it = mDeviceInfo.begin(); it != mDeviceInfo.end(); it++) {
+            VkDevice device = it->first;
+            auto* physDevInfo = gfxstream::base::find(mPhysdevInfo, it->second.physicalDevice);
+            if (physDevInfo && physDevInfo->instance == instance) {
+                InstanceObjects::DeviceObjects& deviceObjects = objects.devices.emplace_back();
+                deviceObjects.device = mDeviceInfo.extract(it);
+                extractDeviceAndDependenciesLocked(device, deviceObjects);
+            }
         }
 
-        for (InstanceObjects::DeviceObjects& deviceObjects : objects.devices) {
-            mDeviceToPhysicalDevice.erase(deviceObjects.device.key());
-        }
-
-        for (auto it = mPhysicalDeviceToInstance.begin(); it != mPhysicalDeviceToInstance.end();) {
-            auto current = it++;
-            auto physicalDevice = current->first;
-            auto& physicalDeviceInstance = current->second;
-            if (physicalDeviceInstance != instance) continue;
-            mPhysicalDeviceToInstance.erase(current);
-            if (mPhysdevInfo.find(physicalDevice) != mPhysdevInfo.end()) {
+        for (auto it = mPhysdevInfo.begin(); it != mPhysdevInfo.end();) {
+            auto physicalDevice = it->first;
+            auto& physDevInfo = it->second;
+            if (physDevInfo.instance == instance) {
                 delete_VkPhysicalDevice(mPhysdevInfo[physicalDevice].boxed);
-                mPhysdevInfo.erase(physicalDevice);
+                it = mPhysdevInfo.erase(it);
+            }
+            else{
+                // Only increment if not erased
+                it++;
             }
         }
     }
@@ -9060,7 +9203,7 @@ class VkDecoderGlobalState::Impl {
             LOG_CALLS_VERBOSE("%s: %zu semaphores.", __func__, deviceObjects.semaphores.size());
             for (auto& [semaphore, semaphoreInfo] : deviceObjects.semaphores) {
                 destroySemaphoreWithExclusiveInfo(device, deviceDispatch, semaphore,
-                                                  deviceObjects.device.mapped(), semaphoreInfo,
+                                                  deviceInfo, semaphoreInfo,
                                                   nullptr);
                 delete_VkSemaphore(semaphoreInfo.boxed);
             }
@@ -9160,7 +9303,7 @@ class VkDecoderGlobalState::Impl {
                                                    renderPassInfo, nullptr);
             }
 
-            destroyDeviceWithExclusiveInfo(device, deviceObjects.device.mapped(),
+            destroyDeviceWithExclusiveInfo(device, deviceInfo,
                                            deviceObjects.fences, deviceObjects.queues, nullptr);
     }
 
@@ -9355,16 +9498,9 @@ class VkDecoderGlobalState::Impl {
         mDescriptorUpdateTemplateInfo.erase(descriptorUpdateTemplate);
     }
 
-    // Returns the VkInstance associated with a VkDevice, or null if it's not found
-    VkInstance* deviceToInstanceLocked(VkDevice device) REQUIRES(mMutex) {
-        auto* physicalDevice = gfxstream::base::find(mDeviceToPhysicalDevice, device);
-        if (!physicalDevice) return nullptr;
-        return gfxstream::base::find(mPhysicalDeviceToInstance, *physicalDevice);
-    }
-
     VulkanDispatch* m_vk;
     VkEmulation* m_vkEmulation;
-    emugl::RenderDocWithMultipleVkInstances* mRenderDocWithMultipleVkInstances = nullptr;
+    gfxstream::host::RenderDocWithMultipleVkInstances* mRenderDocWithMultipleVkInstances = nullptr;
     bool mSnapshotsEnabled = false;
     bool mBatchedDescriptorSetUpdateEnabled = false;
     bool mDisableSparseBindingSupport = false;
@@ -9474,11 +9610,6 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkInstance, InstanceInfo> mInstanceInfo GUARDED_BY(mMutex);
     std::unordered_map<VkPhysicalDevice, PhysicalDeviceInfo> mPhysdevInfo GUARDED_BY(mMutex);
     std::unordered_map<VkDevice, DeviceInfo> mDeviceInfo GUARDED_BY(mMutex);
-
-    // Back-reference to the physical device associated with a particular
-    // VkDevice, and the VkDevice corresponding to a VkQueue.
-    std::unordered_map<VkDevice, VkPhysicalDevice> mDeviceToPhysicalDevice GUARDED_BY(mMutex);
-    std::unordered_map<VkPhysicalDevice, VkInstance> mPhysicalDeviceToInstance GUARDED_BY(mMutex);
 
     // Device objects
     std::unordered_map<VkBuffer, BufferInfo> mBufferInfo GUARDED_BY(mMutex);
@@ -9864,6 +9995,20 @@ void VkDecoderGlobalState::on_vkGetPhysicalDeviceSparseImageFormatProperties2KHR
         VkPhysicalDevice physicalDevice, const VkPhysicalDeviceSparseImageFormatInfo2* pFormatInfo,
         uint32_t* pPropertyCount, VkSparseImageFormatProperties2* pProperties) {
     mImpl->on_vkGetPhysicalDeviceSparseImageFormatProperties2KHR(pool, snapshotInfo, physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+}
+
+void VkDecoderGlobalState::on_vkGetDeviceImageMemoryRequirements(
+    gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo, VkDevice device,
+    const VkDeviceImageMemoryRequirements* pInfo, VkMemoryRequirements2* pMemoryRequirements) {
+    mImpl->on_vkGetDeviceImageMemoryRequirements(pool, snapshotInfo, device, pInfo,
+                                                 pMemoryRequirements);
+}
+
+void VkDecoderGlobalState::on_vkGetDeviceImageMemoryRequirementsKHR(
+    gfxstream::base::BumpPool* pool, VkSnapshotApiCallInfo* snapshotInfo, VkDevice device,
+    const VkDeviceImageMemoryRequirements* pInfo, VkMemoryRequirements2* pMemoryRequirements) {
+    mImpl->on_vkGetDeviceImageMemoryRequirements(pool, snapshotInfo, device, pInfo,
+                                                 pMemoryRequirements);
 }
 
 void VkDecoderGlobalState::on_vkDestroyDevice(gfxstream::base::BumpPool* pool,

@@ -35,7 +35,7 @@
 #include "VkEmulatedPhysicalDeviceMemory.h"
 #include "VkEmulatedPhysicalDeviceQueue.h"
 #include "render-utils/stream.h"
-#include "gfxstream/host/logging.h"
+#include "gfxstream/common/logging.h"
 #include "gfxstream/memory/SharedMemory.h"
 #include "gfxstream/synchronization/ConditionVariable.h"
 #include "gfxstream/synchronization/Lock.h"
@@ -232,6 +232,12 @@ struct DeviceInfo {
         return (gfxstream::vk::isEtc2(format) && emulateTextureEtc2) ||
                (gfxstream::vk::isAstc(format) && emulateTextureAstc);
     }
+
+#ifdef _WIN32
+    PFN_vkGetMemoryWin32HandleKHR getMemoryHandleFunc = nullptr;
+#else
+    PFN_vkGetMemoryFdKHR getMemoryHandleFunc = nullptr;
+#endif
 };
 
 struct PhysicalQueuePendingOps {

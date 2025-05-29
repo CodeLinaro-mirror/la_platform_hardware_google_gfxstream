@@ -105,7 +105,6 @@ elseif(QNX)
     # TODO(jsimonot): fix build error
     # add_compile_definitions(VK_USE_PLATFORM_SCREEN_QNX)
 elseif(UNIX)
-    # TODO(kaiyili, b/179477624): Add Linux specific Vulkan platform macro definitions
     # Use X11 version of EGL platform specific definitions.
     add_compile_definitions(USE_X11)
 elseif(WIN32)
@@ -162,22 +161,13 @@ endif()
 
 set(EXTRA_SUBDIR_TEST_INCLUDE_FILES)
 
-add_subdirectory(common)
-
-# Third party dependencies
 add_subdirectory(third_party)
-
-# Backends######################################################################
-
-add_subdirectory(utils)
+add_subdirectory(common)
+add_subdirectory(codegen)
 add_subdirectory(host)
 
-# Protocols and associated code generators######################################
-
-add_subdirectory(codegen)
-
 if (ENABLE_VKCEREAL_TESTS)
-    list(APPEND EXTRA_SUBDIR_TEST_INCLUDE_FILES ${CMAKE_SOURCE_DIR}/cmake/test_properties.cmake)
+    list(APPEND EXTRA_SUBDIR_TEST_INCLUDE_FILES ${CMAKE_SOURCE_DIR}/toolchain/cmake/test_properties.cmake)
 endif()
 
-include(cmake/SetSubdirectorProperties.cmake)
+include(toolchain/cmake/SetSubdirectorProperties.cmake)

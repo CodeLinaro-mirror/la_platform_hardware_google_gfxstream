@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <log/log.h>
-
 #include <atomic>
 #include <thread>
 
@@ -327,7 +325,7 @@ class GfxstreamEnd2EndVkTest : public GfxstreamEnd2EndTest {
             };
         }
         const vkhpp::SamplerCreateInfo samplerCreateInfo = {
-            .pNext = ahbIsYuv ? &samplerConversionInfo : nullptr,
+            .pNext = ahbIsYuv ? &*samplerConversionInfo : nullptr,
             .magFilter = vkhpp::Filter::eNearest,
             .minFilter = vkhpp::Filter::eNearest,
             .mipmapMode = vkhpp::SamplerMipmapMode::eNearest,
@@ -398,7 +396,7 @@ class GfxstreamEnd2EndVkTest : public GfxstreamEnd2EndTest {
         vk.device->bindImageMemory(*image, *imageMemory, 0);
 
         const vkhpp::ImageViewCreateInfo imageViewCreateInfo = {
-            .pNext = &samplerConversionInfo,
+            .pNext = ahbIsYuv ? &*samplerConversionInfo : nullptr,
             .image = *image,
             .viewType = vkhpp::ImageViewType::e2D,
             .format = static_cast<vkhpp::Format>(ahbFormatProperties.format),
@@ -1869,7 +1867,7 @@ TEST_P(GfxstreamEnd2EndVkTest, AcquireImageAndroidWithFenceAndSemaphore) {
     DoAcquireImageAndroidWithSync(/*withFence=*/true, /*withSemaphore=*/true);
 }
 
-VKAPI_ATTR void VKAPI_CALL MemoryReportCallback(const VkDeviceMemoryReportCallbackDataEXT*, void*) {
+VKAPI_ATTR void VKAPI_CALL MemoryReportCallback(const vkhpp::DeviceMemoryReportCallbackDataEXT*, void*) {
     // Unused
 }
 

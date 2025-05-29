@@ -25,10 +25,9 @@ target_link_libraries(
     OpenglRender_vulkan_cereal
     gfxstream_vulkan_headers
     gfxstream_host_compressed_textures
-    gfxstream_host_logging
+    gfxstream_common_logging
     gfxstream_host_health
-    PRIVATE
-    gfxstream_utils.headers)
+    )
 
 target_include_directories(
     emulated_textures

@@ -36,7 +36,7 @@
 #include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/system/System.h"
 #include "common/goldfish_vk_dispatch.h"
-#include "gfxstream/host/logging.h"
+#include "gfxstream/common/logging.h"
 #include "gfxstream/host/vm_operations.h"
 
 #ifdef _WIN32
@@ -79,61 +79,6 @@ const char* string_AstcEmulationMode(AstcEmulationMode mode) {
 }
 
 }  // namespace
-
-std::optional<GenericDescriptorInfo> VkEmulation::exportMemoryHandle(VkDevice device,
-                                                                     VkDeviceMemory memory) {
-    GenericDescriptorInfo ret;
-
-#if defined(__ANDROID__)
-    // On Android, we currently don't run virtio-gpu in a separate process. Therefore,
-    // we don't have a need to export memory handles from the gpu process to the main
-    // process. Let's not implement this for now.
-    return std::nullopt;
-#elif defined(__unix__)
-    VkMemoryGetFdInfoKHR memoryGetFdInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
-        .pNext = nullptr,
-        .memory = memory,
-        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
-    };
-    ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_FD;
-
-#if defined(__linux__)
-    if (supportsDmaBuf()) {
-        memoryGetFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-        ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_DMABUF;
-    }
-#endif
-
-    int fd = -1;
-    if (mDeviceInfo.getMemoryHandleFunc(mDevice, &memoryGetFdInfo, &fd) != VK_SUCCESS) {
-        return std::nullopt;
-    };
-
-    ret.descriptor = ManagedDescriptor(fd);
-
-#elif defined(_WIN32)
-    VkMemoryGetWin32HandleInfoKHR memoryGetHandleInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR,
-        .pNext = nullptr,
-        .memory = memory,
-        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT,
-    };
-    ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_OPAQUE_WIN32;
-
-    HANDLE handle;
-    if (mDeviceInfo.getMemoryHandleFunc(mDevice, &memoryGetHandleInfo, &handle) != VK_SUCCESS) {
-        return std::nullopt;
-    }
-
-    ret.descriptor = ManagedDescriptor(handle);
-#else
-    GFXSTREAM_ERROR("Unsupported external memory handle type.");
-    return std::nullopt;
-#endif
-
-    return std::move(ret);
-}
 
 static std::optional<ExternalHandleInfo> dupExternalMemory(std::optional<ExternalHandleInfo> handleInfo) {
     if (!handleInfo) {
@@ -1837,7 +1782,7 @@ const gfxstream::host::BackendCallbacks& VkEmulation::getCallbacks() const { ret
 
 AstcEmulationMode VkEmulation::getAstcLdrEmulationMode() const { return mAstcLdrEmulationMode; }
 
-emugl::RenderDocWithMultipleVkInstances* VkEmulation::getRenderDoc() {
+gfxstream::host::RenderDocWithMultipleVkInstances* VkEmulation::getRenderDoc() {
     return mGuestRenderDoc.get();
 }
 

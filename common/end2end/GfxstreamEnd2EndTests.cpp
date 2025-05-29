@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
-
 #include "GfxstreamEnd2EndTests.h"
-
-#include <dlfcn.h>
-#include <log/log.h>
 
 #include <filesystem>
 
-#include "aemu/base/Path.h"
+#include <dlfcn.h>
+
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
+#include "TestDataUtils.h"
+#include "VirtGpu.h"
 #include "gfxstream/ImageUtils.h"
 #include "gfxstream/Strings.h"
+#include "gfxstream/common/logging.h"
+#include "gfxstream/system/System.h"
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
@@ -39,11 +41,6 @@ using testing::IsFalse;
 using testing::IsTrue;
 using testing::Not;
 using testing::NotNull;
-
-std::string GetTestDataPath(const std::string& basename) {
-    const std::filesystem::path testBinaryDirectory = gfxstream::guest::getProgramDirectory();
-    return (testBinaryDirectory / "testdata" / basename).string();
-}
 
 }  // namespace
 
@@ -127,19 +124,34 @@ std::vector<TestParams> WithAndWithoutFeatures(const std::vector<TestParams>& pa
 }
 
 std::unique_ptr<GuestGlDispatchTable> GfxstreamEnd2EndTest::SetupGuestGl() {
-    const std::filesystem::path testDirectory = gfxstream::guest::getProgramDirectory();
-    const std::string eglLibPath = (testDirectory / "libEGL_emulation.so").string();
-    const std::string gles2LibPath = (testDirectory / "libGLESv2_emulation.so").string();
+    const std::filesystem::path eglLibPath = GetTestDataPath("libEGL_emulation.so");
+    const std::filesystem::path gles1LibPath = GetTestDataPath("libGLESv1_CM_emulation.so");
+    const std::filesystem::path gles2LibPath = GetTestDataPath("libGLESv2_emulation.so");
+    const std::string eglLibPathStr = eglLibPath.string();
+    const std::string gles1LibPathStr = gles1LibPath.string();
+    const std::string gles2LibPathStr = gles2LibPath.string();
 
-    void* eglLib = dlopen(eglLibPath.c_str(), RTLD_NOW | RTLD_LOCAL);
+    const std::string testdataDirectory = eglLibPath.parent_path().string();
+    gfxstream::base::setEnvironmentVariable("GFXSTREAM_TESTDATA_PATH", testdataDirectory.c_str());
+
+    void* eglLib = dlopen(eglLibPathStr.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!eglLib) {
-        ALOGE("Failed to load Gfxstream EGL library from %s.", eglLibPath.c_str());
+        GFXSTREAM_ERROR("Failed to load Gfxstream EGL library from %s: %s.",
+                        eglLibPathStr.c_str(), dlerror());
         return nullptr;
     }
 
-    void* gles2Lib = dlopen(gles2LibPath.c_str(), RTLD_NOW | RTLD_LOCAL);
+    void* gles1Lib = dlopen(gles1LibPathStr.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!gles1Lib) {
+        GFXSTREAM_ERROR("Failed to load Gfxstream GLES1 library from %s: %s.",
+                        gles1LibPathStr.c_str(), dlerror());
+        return nullptr;
+    }
+
+    void* gles2Lib = dlopen(gles2LibPathStr.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!gles2Lib) {
-        ALOGE("Failed to load Gfxstream GLES2 library from %s.", gles2LibPath.c_str());
+        GFXSTREAM_ERROR("Failed to load Gfxstream GLES2 library from %s: %s.",
+                        gles2LibPathStr.c_str(), dlerror());
         return nullptr;
     }
 
@@ -148,7 +160,8 @@ std::unique_ptr<GuestGlDispatchTable> GfxstreamEnd2EndTest::SetupGuestGl() {
 
     auto eglGetAddr = reinterpret_cast<GetProcAddrType*>(dlsym(eglLib, "eglGetProcAddress"));
     if (!eglGetAddr) {
-        ALOGE("Failed to load Gfxstream EGL library from %s.", eglLibPath.c_str());
+        GFXSTREAM_ERROR("Failed to load Gfxstream EGL library from %s: %s",
+                        eglLibPathStr.c_str(), dlerror());
         return nullptr;
     }
 
@@ -174,12 +187,11 @@ std::unique_ptr<GuestGlDispatchTable> GfxstreamEnd2EndTest::SetupGuestGl() {
 }
 
 std::unique_ptr<GuestRenderControlDispatchTable> GfxstreamEnd2EndTest::SetupGuestRc() {
-    const std::filesystem::path testDirectory = gfxstream::guest::getProgramDirectory();
-    const std::string rcLibPath = (testDirectory / "libgfxstream_guest_rendercontrol.so").string();
+    const std::string rcLibPath = GetTestDataPath("libgfxstream_guest_rendercontrol.so").string();
 
     void* rcLib = dlopen(rcLibPath.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!rcLib) {
-        ALOGE("Failed to load Gfxstream RenderControl library from %s.", rcLibPath.c_str());
+        GFXSTREAM_ERROR("Failed to load Gfxstream RenderControl library from %s.", rcLibPath.c_str());
         return nullptr;
     }
 
@@ -188,7 +200,7 @@ std::unique_ptr<GuestRenderControlDispatchTable> GfxstreamEnd2EndTest::SetupGues
 #define LOAD_RENDERCONTROL_FUNCTION(name)                         \
     rc->name = reinterpret_cast<PFN_##name>(dlsym(rcLib, #name)); \
     if (rc->name == nullptr) {                                    \
-        ALOGE("Failed to load RenderControl function %s", #name); \
+        GFXSTREAM_ERROR("Failed to load RenderControl function %s", #name); \
         return nullptr;                                           \
     }
 
@@ -199,19 +211,18 @@ std::unique_ptr<GuestRenderControlDispatchTable> GfxstreamEnd2EndTest::SetupGues
     return rc;
 }
 
-std::unique_ptr<vkhpp::DynamicLoader> GfxstreamEnd2EndTest::SetupGuestVk() {
-    const std::filesystem::path testDirectory = gfxstream::guest::getProgramDirectory();
-    const std::string vkLibPath = (testDirectory / "vulkan.ranchu.so").string();
+std::unique_ptr<vkhpp::detail::DynamicLoader> GfxstreamEnd2EndTest::SetupGuestVk() {
+    const std::string vkLibPath = GetTestDataPath("vulkan.ranchu.so").string();
 
-    auto dl = std::make_unique<vkhpp::DynamicLoader>(vkLibPath);
+    auto dl = std::make_unique<vkhpp::detail::DynamicLoader>(vkLibPath);
     if (!dl->success()) {
-        ALOGE("Failed to load Vulkan from: %s", vkLibPath.c_str());
+        GFXSTREAM_ERROR("Failed to load Vulkan from: %s", vkLibPath.c_str());
         return nullptr;
     }
 
     auto getInstanceProcAddr = dl->getProcAddress<PFN_vkGetInstanceProcAddr>("vk_icdGetInstanceProcAddr");
     if (!getInstanceProcAddr) {
-        ALOGE("Failed to load Vulkan vkGetInstanceProcAddr. %s", dlerror());
+        GFXSTREAM_ERROR("Failed to load Vulkan vkGetInstanceProcAddr. %s", dlerror());
         return nullptr;
     }
 
@@ -277,6 +288,7 @@ void GfxstreamEnd2EndTest::TearDownGuest() {
 void GfxstreamEnd2EndTest::TearDown() {
     TearDownGuest();
     mKumquatInstance.reset();
+    VirtGpuDevice::resetInstance();
 }
 
 void GfxstreamEnd2EndTest::SetUpEglContextAndSurface(
@@ -377,7 +389,7 @@ Result<ScopedGlShader> ScopedGlShader::MakeShader(GlDispatch& dispatch, GLenum t
         dispatch.glGetShaderInfoLog(shader, errorLogLength, &errorLogLength, errorLog.data());
 
         const std::string errorString = errorLogLength == 0 ? "" : errorLog.data();
-        ALOGE("Shader compilation failed with: \"%s\"", errorString.c_str());
+        GFXSTREAM_ERROR("Shader compilation failed with: \"%s\"", errorString.c_str());
 
         dispatch.glDeleteShader(shader);
         return gfxstream::unexpected(errorString);
@@ -412,7 +424,7 @@ Result<ScopedGlProgram> ScopedGlProgram::MakeProgram(GlDispatch& dispatch,
         dispatch.glGetProgramInfoLog(program, errorLogLength, nullptr, errorLog.data());
 
         const std::string errorString = errorLogLength == 0 ? "" : errorLog.data();
-        ALOGE("Program link failed with: \"%s\"", errorString.c_str());
+        GFXSTREAM_ERROR("Program link failed with: \"%s\"", errorString.c_str());
 
         dispatch.glDeleteProgram(program);
         return gfxstream::unexpected(errorString);
@@ -441,7 +453,7 @@ Result<ScopedGlProgram> ScopedGlProgram::MakeProgram(
         dispatch.glGetProgramInfoLog(program, errorLogLength, nullptr, errorLog.data());
 
         const std::string errorString = errorLogLength == 0 ? "" : errorLog.data();
-        ALOGE("Program link failed with: \"%s\"", errorString.c_str());
+        GFXSTREAM_ERROR("Program link failed with: \"%s\"", errorString.c_str());
 
         dispatch.glDeleteProgram(program);
         return gfxstream::unexpected(errorString);
@@ -493,9 +505,9 @@ Result<ScopedGlProgram> GfxstreamEnd2EndTest::SetUpProgram(
 Result<GfxstreamEnd2EndTest::TypicalVkTestEnvironment>
 GfxstreamEnd2EndTest::SetUpTypicalVkTestEnvironment(const TypicalVkTestEnvironmentOptions& opts) {
     const auto availableInstanceLayers = vkhpp::enumerateInstanceLayerProperties().value;
-    ALOGV("Available instance layers:");
+    GFXSTREAM_VERBOSE("Available instance layers:");
     for (const vkhpp::LayerProperties& layer : availableInstanceLayers) {
-        ALOGV(" - %s", layer.layerName.data());
+        GFXSTREAM_VERBOSE(" - %s", layer.layerName.data());
     }
 
     constexpr const bool kEnableValidationLayers = true;
@@ -527,10 +539,10 @@ GfxstreamEnd2EndTest::SetUpTypicalVkTestEnvironment(const TypicalVkTestEnvironme
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*instance);
 
     auto physicalDevices = GFXSTREAM_EXPECT_VKHPP_RV(instance->enumeratePhysicalDevices());
-    ALOGV("Available physical devices:");
+    GFXSTREAM_VERBOSE("Available physical devices:");
     for (const auto& physicalDevice : physicalDevices) {
         const auto physicalDeviceProps = physicalDevice.getProperties();
-        ALOGV(" - %s", physicalDeviceProps.deviceName.data());
+        GFXSTREAM_VERBOSE(" - %s", physicalDeviceProps.deviceName.data());
     }
 
     if (physicalDevices.empty()) {
@@ -541,14 +553,14 @@ GfxstreamEnd2EndTest::SetUpTypicalVkTestEnvironment(const TypicalVkTestEnvironme
     auto physicalDevice = std::move(physicalDevices[0]);
     {
         const auto physicalDeviceProps = physicalDevice.getProperties();
-        ALOGV("Selected physical device: %s", physicalDeviceProps.deviceName.data());
+        GFXSTREAM_VERBOSE("Selected physical device: %s", physicalDeviceProps.deviceName.data());
     }
     {
         const auto exts =
             GFXSTREAM_EXPECT_VKHPP_RV(physicalDevice.enumerateDeviceExtensionProperties());
-        ALOGV("Available physical device extensions:");
+        GFXSTREAM_VERBOSE("Available physical device extensions:");
         for (const auto& ext : exts) {
-            ALOGV(" - %s", ext.extensionName.data());
+            GFXSTREAM_VERBOSE(" - %s", ext.extensionName.data());
         }
     }
 
@@ -856,6 +868,20 @@ static constexpr int SaturateToInt(float x) {
 static constexpr float Round(float x) { return (float)((double)x); }
 
 }  // namespace
+
+std::vector<uint8_t> Fill(uint32_t w, uint32_t h, const PixelR8G8B8A8& pixel) {
+    std::vector<uint8_t> ret;
+    ret.reserve(w * h * 4);
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            ret.push_back(pixel.r);
+            ret.push_back(pixel.g);
+            ret.push_back(pixel.b);
+            ret.push_back(pixel.a);
+        }
+    }
+    return ret;
+}
 
 void RGBToYUV(uint8_t r, uint8_t g, uint8_t b, uint8_t* outY, uint8_t* outU, uint8_t* outV) {
     static const float kRGBToYUVBT601FullRange[] = {
