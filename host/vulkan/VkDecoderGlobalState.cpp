@@ -2748,10 +2748,13 @@ class VkDecoderGlobalState::Impl {
     void destroyImageWithExclusiveInfo(VkDevice device, VulkanDispatch* deviceDispatch,
                                        VkImage image, ImageInfo& imageInfo,
                                        const VkAllocationCallbacks* pAllocator) {
-        if (!imageInfo.anbInfo && imageInfo.compressInfo) {
-            imageInfo.compressInfo->destroy(deviceDispatch);
-            if (image != imageInfo.compressInfo->outputImage()) {
+        if (!imageInfo.anbInfo) {
+            if (!imageInfo.compressInfo || image != imageInfo.compressInfo->outputImage()) {
                 deviceDispatch->vkDestroyImage(device, image, pAllocator);
+            }
+            if (imageInfo.compressInfo) {
+                imageInfo.compressInfo->destroy(deviceDispatch);
+                imageInfo.compressInfo.reset();
             }
         }
 
@@ -3352,23 +3355,68 @@ class VkDecoderGlobalState::Impl {
         std::vector<VkFence> cleanedFences;
         std::vector<VkFence> externalFences;
 
+        std::vector<DeviceOpWaitable> pendingUses;
+
         {
             std::lock_guard<std::mutex> lock(mMutex);
-            for (uint32_t i = 0; i < fenceCount; i++) {
-                if (pFences[i] == VK_NULL_HANDLE) continue;
 
-                if (mFenceInfo.find(pFences[i]) == mFenceInfo.end()) {
+            for (uint32_t i = 0; i < fenceCount; i++) {
+                VkFence fence = pFences[i];
+                if (fence == VK_NULL_HANDLE) continue;
+
+                auto fenceInfoIt = mFenceInfo.find(fence);
+                if (fenceInfoIt == mFenceInfo.end()) {
                     GFXSTREAM_ERROR("Invalid fence handle: %p!", pFences[i]);
-                } else {
-                    if (mFenceInfo[pFences[i]].external) {
-                        externalFences.push_back(pFences[i]);
-                    } else {
-                        // Reset all fences' states to kNotWaitable.
-                        cleanedFences.push_back(pFences[i]);
-                        mFenceInfo[pFences[i]].state = FenceInfo::State::kNotWaitable;
+                    continue;
+                }
+                FenceInfo& fenceInfo = fenceInfoIt->second;
+
+                if (fenceInfo.latestUse) {
+                    if (!IsDone(*fenceInfo.latestUse)) {
+                        pendingUses.emplace_back(*fenceInfo.latestUse);
                     }
+                    fenceInfo.latestUse.reset();
+                }
+
+                if (fenceInfo.external) {
+                    externalFences.push_back(fence);
+                } else {
+                    // Reset all fences' states to kNotWaitable.
+                    cleanedFences.push_back(fence);
+                    fenceInfo.state = FenceInfo::State::kNotWaitable;
                 }
             }
+        }
+
+        // Ensure that any host operations that reference this fence have completed
+        // before reseting.
+        while (!pendingUses.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(mMutex);
+
+                auto deviceInfoIt = mDeviceInfo.find(device);
+                if (deviceInfoIt == mDeviceInfo.end()) {
+                    GFXSTREAM_ERROR("Invalid VkDevice:%p!", device);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
+                DeviceInfo& deviceInfo = deviceInfoIt->second;
+
+                if (!deviceInfo.deviceOpTracker) {
+                    GFXSTREAM_ERROR("VkDevice:%p missing op tracker?", device);
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
+                deviceInfo.deviceOpTracker->PollAndProcessGarbage();
+            }
+
+            pendingUses.erase(
+                std::remove_if(pendingUses.begin(),
+                               pendingUses.end(),
+                               [](const DeviceOpWaitable& waitable) {
+                                    return IsDone(waitable);
+                               }),
+                pendingUses.end());
+
+            std::this_thread::yield();
         }
 
         if (!cleanedFences.empty()) {
@@ -4062,8 +4110,10 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::mutex> lock(mMutex);
 
-        auto allocValidationRes = validateDescriptorSetAllocLocked(pAllocateInfo);
-        if (allocValidationRes != VK_SUCCESS) return allocValidationRes;
+        if (m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+            auto allocValidationRes = validateDescriptorSetAllocLocked(pAllocateInfo);
+            if (allocValidationRes != VK_SUCCESS) return allocValidationRes;
+        }
 
         auto res = vk->vkAllocateDescriptorSets(device, pAllocateInfo, pDescriptorSets);
 
@@ -8445,7 +8495,7 @@ class VkDecoderGlobalState::Impl {
                 // parameters.
                 colorBufferVkImageCi = m_vkEmulation->generateColorBufferVkImageCreateInfo(
                     resolvedFormat, imageCreateInfo.extent.width, imageCreateInfo.extent.height,
-                    imageCreateInfo.tiling);
+                    imageCreateInfo.tiling, imageCreateInfo.mipLevels);
                 importSourceDebug = "AHardwareBuffer";
             } else if (pNativeBufferANDROID) {
                 // For native buffer binding, we can query the creation parameters from handle.
@@ -8521,7 +8571,8 @@ class VkDecoderGlobalState::Impl {
             imageCreateInfo.usage |= colorBufferVkImageCi->usage;
             // For the AndroidHardwareBuffer binding case VkImageCreateInfo::sharingMode isn't
             // filled in generateColorBufferVkImageCreateInfo, and
-            // VkImageCreateInfo::{format,extent::{width, height}, tiling} are guaranteed to match.
+            // VkImageCreateInfo::{format,extent::{width, height}, tiling, mipLevels} are guaranteed
+            // to match.
             if (importAndroidHardwareBuffer) {
                 continue;
             }
