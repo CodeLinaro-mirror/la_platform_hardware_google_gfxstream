@@ -41,10 +41,48 @@ void RenderLibImpl::getGlesVersion(int* maj, int* min) {
 }
 
 void RenderLibImpl::setLogger(gfxstream_log_callback_t callback) {
-    gfxstream::host::SetGfxstreamLogCallback(
-        [callback](gfxstream::host::LogLevel level, const char* file, int line, const char* function, const char* message) {
-            callback(static_cast<gfxstream_logging_level>(level), file, line, function, message);
-        });
+    gfxstream::host::SetGfxstreamLogCallback([callback](gfxstream::host::LogLevel level,
+                                                        const char* file, int line,
+                                                        const char* function, const char* message) {
+        callback(static_cast<gfxstream_logging_level>(level), file, line, function, message);
+    });
+
+    // Set log level based on env vars
+    std::optional<gfxstream_logging_level> logLevel;
+    if (gfxstream::base::getEnvironmentVariable("GFXSTREAM_LOG_VERBOSE") ==
+        "1") {  // TODO0: set from qemu side with -verbose
+        logLevel = GFXSTREAM_LOGGING_LEVEL_VERBOSE;
+    } else {
+        const char* ENVVAR_GFXSTREAM_LOG_LEVEL = "GFXSTREAM_LOG_LEVEL";
+        const std::string logLevelStr =
+            gfxstream::base::getEnvironmentVariable(ENVVAR_GFXSTREAM_LOG_LEVEL);
+        if (logLevelStr.length()) {
+            if (logLevelStr == "error") {
+                logLevel = GFXSTREAM_LOGGING_LEVEL_ERROR;
+            } else if (logLevelStr == "warning") {
+                logLevel = GFXSTREAM_LOGGING_LEVEL_WARNING;
+            } else if (logLevelStr == "info") {
+                logLevel = GFXSTREAM_LOGGING_LEVEL_INFO;
+            } else if (logLevelStr == "debug") {
+                logLevel = GFXSTREAM_LOGGING_LEVEL_DEBUG;
+            } else if (logLevelStr == "verbose") {
+                logLevel = GFXSTREAM_LOGGING_LEVEL_VERBOSE;
+            } else {
+                GFXSTREAM_ERROR(
+                    "Invalid setting for environment variable %s: %s, valid options: [error, "
+                    "warning, "
+                    "info, debug, verbose]",
+                    ENVVAR_GFXSTREAM_LOG_LEVEL, logLevelStr.c_str());
+            }
+        }
+    }
+    if (logLevel) {
+        setLogLevel(logLevel.value());
+    }
+}
+
+void RenderLibImpl::setLogLevel(gfxstream_logging_level level) {
+    gfxstream::host::SetGfxstreamLogLevel((host::LogLevel)level);
 }
 
 void RenderLibImpl::setSyncDevice
