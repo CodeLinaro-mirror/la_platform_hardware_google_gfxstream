@@ -34,11 +34,11 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: "~/bazel-disk-cache"
-        key: ${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${{ env.CACHE_VERSION }}-unit-test-${{ github.ref_name }}-${{ github.sha }}
+        key: ${{ format('{0}-{1}-bazel-disk-cache-{2}-{3}-{4}-', runner.os, runner.arch, env.CACHE_VERSION, github.ref_name, github.sha) }}
         restore-keys: |
-          ${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${{ env.CACHE_VERSION }}-unit-test-${{ github.ref_name }}-
-          ${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${{ env.CACHE_VERSION }}-unit-test-main-
-          ${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${{ env.CACHE_VERSION }}-unit-test-
+          ${{ format('{0}-{1}-bazel-disk-cache-{2}-{3}-', runner.os, runner.arch, env.CACHE_VERSION, github.ref_name) || '' }}
+          ${{ format('{0}-{1}-bazel-disk-cache-{2}-main-', runner.os, runner.arch, env.CACHE_VERSION) || '' }}
+          ${{ format('{0}-{1}-bazel-disk-cache-{2}-', runner.os, runner.arch, env.CACHE_VERSION) || '' }}
     - name: Build
       run: |
         bazel build ... \
@@ -74,11 +74,11 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: "~/bazel-disk-cache"
-        key: ${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${{ env.CACHE_VERSION }}-unit-test-${{ github.ref_name }}-${{ github.sha }}
+        key: ${{ format('{0}-{1}-bazel-disk-cache-{2}-{3}-{4}-', runner.os, runner.arch, env.CACHE_VERSION, github.ref_name, github.sha) }}
         restore-keys: |
-          ${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${{ env.CACHE_VERSION }}-unit-test-${{ github.ref_name }}-
-          ${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${{ env.CACHE_VERSION }}-unit-test-main-
-          ${{ runner.os }}-${{ runner.arch }}-bazel-disk-cache-${{ env.CACHE_VERSION }}-unit-test-
+          ${{ format('{0}-{1}-bazel-disk-cache-{2}-{3}-', runner.os, runner.arch, env.CACHE_VERSION, github.ref_name) || '' }}
+          ${{ format('{0}-{1}-bazel-disk-cache-{2}-main-', runner.os, runner.arch, env.CACHE_VERSION) || '' }}
+          ${{ format('{0}-{1}-bazel-disk-cache-{2}-', runner.os, runner.arch, env.CACHE_VERSION) || '' }}
     - name: Build
       run: |
         bazel build ... \
@@ -125,3 +125,28 @@ jobs:
     - name: Build
       run: |
         meson compile -C build
+  run-gfxstream-meson-build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout current PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: |
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-headers-git
+      - name: Configure Build
+        run: meson setup build
+      - name: Build
+        run: meson compile -C build
