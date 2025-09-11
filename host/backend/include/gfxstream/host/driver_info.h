@@ -12,27 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package {
-    default_applicable_licenses: ["hardware_google_gfxstream_license"],
+#pragma once
+
+#include <string>
+
+namespace gfxstream {
+namespace host {
+
+enum class GpuVendor {
+    kUnknown,
+    kIntel,
+};
+
+inline GpuVendor GetGpuVendor(const std::string& vendorName) {
+    if (vendorName.find("Intel") != std::string::npos) {
+        return GpuVendor::kIntel;
+    }
+    return GpuVendor::kUnknown;
 }
 
-cc_library_static {
-    name: "libgfxstream_host_health",
-    defaults: ["gfxstream_host_cc_defaults"],
-    export_include_dirs: [
-        "include",
-    ],
-    srcs: [
-        "HealthMonitor.cpp",
-        "TestClock.cpp",
-    ],
-    static_libs: [
-        "libgfxstream_common_base",
-        "libgfxstream_common_logging",
-        "libgfxstream_host_metrics",
-    ],
-    export_static_lib_headers: [
-        "libgfxstream_common_base",
-        "libgfxstream_host_metrics",
-    ],
-}
+}  // namespace host
+}  // namespace gfxstream
