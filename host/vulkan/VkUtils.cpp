@@ -46,14 +46,21 @@ std::optional<uint32_t> findMemoryType(const VulkanDispatch* ivk, VkPhysicalDevi
     return std::nullopt;
 }
 
-bool YcbcrSamplerPool::init(const VulkanDispatch* vk, VkDevice device) {
-    if (mDvk || !vk || device == VK_NULL_HANDLE) {
-        // Already initialized or invalid parameters
-        GFXSTREAM_ERROR("Cannot initialize YcbcrSamplerPool!");
+bool YcbcrSamplerPool::init(const VulkanDispatch* ivk, const VulkanDispatch* dvk,
+                            VkPhysicalDevice physicalDevice, VkDevice device) {
+    if (mDvk) {
+        // Already initialized
+        GFXSTREAM_ERROR("Cannot initialize YcbcrSamplerPool: already initialized");
         return false;
     }
-    mDvk = vk;
+    if (!dvk || !ivk || device == VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE) {
+        GFXSTREAM_ERROR("Cannot initialize YcbcrSamplerPool: invalid parameters");
+        return false;
+    }
+    mDvk = dvk;
+    mIvk = ivk;
     mDevice = device;
+    mPhysicalDevice = physicalDevice;
 
     // Create some conversion objects for known formats
     std::array<VkFormat, 2> prePopulateFormats = {
@@ -78,12 +85,14 @@ void YcbcrSamplerPool::destroy() {
     }
     m_ycbcrSamplers.clear();
     mDvk = nullptr;
+    mIvk = nullptr;
     mDevice = VK_NULL_HANDLE;
+    mPhysicalDevice = VK_NULL_HANDLE;
 }
 
 VkSamplerYcbcrConversion YcbcrSamplerPool::getConversion(VkFormat format) {
     YCbCrSamplerInfo info;
-    if ( getOrCreateSamplerInfo(format, &info) ) {
+    if (getOrCreateSamplerInfo(format, &info)) {
         return info.conversion;
     }
     return VK_NULL_HANDLE;
@@ -91,10 +100,20 @@ VkSamplerYcbcrConversion YcbcrSamplerPool::getConversion(VkFormat format) {
 
 VkSampler YcbcrSamplerPool::getSampler(VkFormat format) {
     YCbCrSamplerInfo info;
-    if ( getOrCreateSamplerInfo(format, &info) ) {
+    if (getOrCreateSamplerInfo(format, &info)) {
         return info.sampler;
     }
     return VK_NULL_HANDLE;
+}
+
+std::vector<VkFormat> YcbcrSamplerPool::getAllFormats() const {
+    std::vector<VkFormat> ret;
+    std::lock_guard<std::mutex> lock(mMutex);
+    ret.reserve(m_ycbcrSamplers.size());
+    for (auto iter : m_ycbcrSamplers) {
+        ret.push_back(iter.first);
+    }
+    return ret;
 }
 
 bool YcbcrSamplerPool::getOrCreateSamplerInfo(VkFormat format, YCbCrSamplerInfo* outInfo) {
@@ -113,6 +132,21 @@ bool YcbcrSamplerPool::getOrCreateSamplerInfo(VkFormat format, YCbCrSamplerInfo*
     outInfo->conversion = VK_NULL_HANDLE;
     outInfo->sampler = VK_NULL_HANDLE;
 
+    // TODO: move this to another common helper class in vk_util.h. (also
+    // CompositorVk::getFormatFeatures) and better handling of the tiling mode.
+    VkFormatProperties formatProperties = {};
+    mIvk->vkGetPhysicalDeviceFormatProperties(mPhysicalDevice, format, &formatProperties);
+    const VkFormatFeatureFlags formatFeatures = formatProperties.optimalTilingFeatures;
+
+    // VUID-VkSamplerYcbcrConversionCreateInfo-xChromaOffset-01652
+    // If the potential format features of the sampler Y′CBCR conversion do not support
+    // VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT, xChromaOffset and yChromaOffset must not
+    // be VK_CHROMA_LOCATION_MIDPOINT if the corresponding components are downsampled
+    VkChromaLocation chromaLoc = VK_CHROMA_LOCATION_MIDPOINT;
+    if ((formatFeatures & VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT) == 0) {
+        chromaLoc = VK_CHROMA_LOCATION_COSITED_EVEN;
+    }
+
     // Create the VkSamplerYcbcrConversion object with correct format
     const VkSamplerYcbcrConversionCreateInfo ycbcrConversionCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
@@ -122,8 +156,8 @@ bool YcbcrSamplerPool::getOrCreateSamplerInfo(VkFormat format, YCbCrSamplerInfo*
         .ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL,
         .components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
-        .xChromaOffset = VK_CHROMA_LOCATION_MIDPOINT,
-        .yChromaOffset = VK_CHROMA_LOCATION_MIDPOINT,
+        .xChromaOffset = chromaLoc,
+        .yChromaOffset = chromaLoc,
         .chromaFilter = VK_FILTER_NEAREST,
         .forceExplicitReconstruction = VK_FALSE};
     VkResult res = mDvk->vkCreateSamplerYcbcrConversion(mDevice, &ycbcrConversionCreateInfo,
@@ -147,8 +181,8 @@ bool YcbcrSamplerPool::getOrCreateSamplerInfo(VkFormat format, YCbCrSamplerInfo*
     const VkSamplerCreateInfo samplerInfo = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .pNext = &conversionInfo,
-        .magFilter = VK_FILTER_LINEAR,
-        .minFilter = VK_FILTER_LINEAR,
+        .magFilter = VK_FILTER_NEAREST,
+        .minFilter = VK_FILTER_NEAREST,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU = kYcbcrSamplerMode,
         .addressModeV = kYcbcrSamplerMode,
