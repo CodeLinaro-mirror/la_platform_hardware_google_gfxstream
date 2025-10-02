@@ -66,6 +66,7 @@ GLuint createShader(GLint shaderType, const char* shaderText) {
         //     "There may be an issue with the GPU drivers on your machine. "
         //     "Try using software rendering; launch the emulator "
         //     "from the command line with -gpu swiftshader_indirect. ");
+        GFXSTREAM_FATAL("Could not compile shader for guest framebuffer blit.");
     }
 
     return shader;
@@ -95,7 +96,7 @@ const char kVertexShaderSource[] =
 
 // Similarly, just interpolate texture coordinates.
 const char kFragmentShaderSource[] =
-    "#define kComposeModeDevice 2\n"
+    "#define HWC2_COMPOSITION_DEVICE 2\n"
     "precision mediump float;\n"
     "varying lowp vec2 outCoord;\n"
     "uniform sampler2D tex;\n"
@@ -106,7 +107,7 @@ const char kFragmentShaderSource[] =
 
     "void main(void) {\n"
     "  vec4 outColor;\n"
-    "  if (composeMode == kComposeModeDevice) {\n"
+    "  if (composeMode == HWC2_COMPOSITION_DEVICE) {\n"
     "    outColor = alpha * texture2D(tex, outCoord);\n"
     "  } else {\n"
     "    outColor = alpha * color;\n"
@@ -198,13 +199,7 @@ TextureDraw::TextureDraw()
       mScaleSlot(-1),
       mTextureSlot(-1),
       mTranslationSlot(-1),
-      mColorTransform(-1),
-      mMaskTexture(0),
-      mMaskTextureWidth(0),
-      mMaskTextureHeight(0),
-      mHaveNewMask(false),
-      mMaskIsValid(false),
-      mShouldReallocateTexture(true) {
+      mColorTransform(-1) {
     // Create shaders and program.
     mVertexShader = createShader(GL_VERTEX_SHADER, kVertexShaderSource);
     mFragmentShader = createShader(GL_FRAGMENT_SHADER, kFragmentShaderSource);
@@ -247,7 +242,7 @@ TextureDraw::TextureDraw()
 
     // set default uniform values
     s_gles2.glUniform1f(mAlpha, 1.0);
-    s_gles2.glUniform1i(mComposeMode, 2);
+    s_gles2.glUniform1i(mComposeMode, HWC2_COMPOSITION_DEVICE);
     s_gles2.glUniform2f(mTranslationSlot, 0.0, 0.0);
     s_gles2.glUniform2f(mScaleSlot, 1.0, 1.0);
     s_gles2.glUniform2f(mCoordTranslation, 0.0, 0.0);
@@ -279,8 +274,12 @@ TextureDraw::TextureDraw()
     s_gles2.glBindBuffer(GL_ARRAY_BUFFER, 0);
     s_gles2.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
-    // Create a texture handle for use with an overlay mask
-    s_gles2.glGenTextures(1, &mMaskTexture);
+    mMaskLayer.create();
+    mBackgroundLayer.create();
+    mBackgroundOffset[0] = 0.0f;
+    mBackgroundOffset[1] = 0.0f;
+    mBackgroundSize[0] = 1.0f;
+    mBackgroundSize[1] = 1.0f;
 }
 
 bool TextureDraw::drawImpl(GLuint texture, float rotation,
@@ -295,8 +294,6 @@ bool TextureDraw::drawImpl(GLuint texture, float rotation,
 
     s_gles2.glUseProgram(mProgram);
 
-    s_gles2.glEnable(GL_BLEND);
-    s_gles2.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 #ifdef DEBUG_TEXTURE_DRAW
     GLenum err = s_gles2.glGetError();
     if (err != GL_NO_ERROR) {
@@ -340,20 +337,6 @@ bool TextureDraw::drawImpl(GLuint texture, float rotation,
                                   reinterpret_cast<GLvoid*>(
                                         static_cast<uintptr_t>(
                                                 sizeof(float) * 3)));
-
-    // setup the |texture| uniform value.
-    s_gles2.glActiveTexture(GL_TEXTURE0);
-    s_gles2.glBindTexture(GL_TEXTURE_2D, texture);
-    s_gles2.glUniform1i(mTextureSlot, 0);
-
-    // setup the |translation| uniform value.
-    s_gles2.glUniform2f(mTranslationSlot, dx, dy);
-
-    if (colorTransform) {
-        s_gles2.glUniformMatrix4fv(mColorTransform, 1, GL_FALSE, colorTransform);
-    } else {
-        s_gles2.glUniformMatrix4fv(mColorTransform, 1, GL_FALSE, kIdentityMatrix);
-    }
 
 #ifdef DEBUG_TEXTURE_DRAW
     // Validate program, just to be sure.
@@ -399,75 +382,55 @@ bool TextureDraw::drawImpl(GLuint texture, float rotation,
     }
     s_gles2.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     s_gles2.glClear(GL_COLOR_BUFFER_BIT);
+
+    bool drawBackground = wantOverlay && mBackgroundLayer.mIsValid;
+
+    if (drawBackground) {
+        s_gles2.glDisable(GL_BLEND);
+
+        GLfloat prevCoordTranslation[2];
+        GLfloat prevCoordScale[2];
+        s_gles2.glGetUniformfv(mProgram, mCoordTranslation, prevCoordTranslation);
+        s_gles2.glGetUniformfv(mProgram, mCoordScale, prevCoordScale);
+
+        s_gles2.glUniform2f(mCoordTranslation, mBackgroundOffset[0], mBackgroundOffset[1]);
+        s_gles2.glUniform2f(mCoordScale, mBackgroundSize[0], mBackgroundSize[1]);
+
+        mBackgroundLayer.draw(mProgram, mScaleSlot, indexShift);
+
+        // reset previous values
+        s_gles2.glUniform2f(mCoordTranslation, prevCoordTranslation[0], prevCoordTranslation[1]);
+        s_gles2.glUniform2f(mCoordScale, prevCoordScale[0], prevCoordScale[1]);
+    }
+
+    s_gles2.glEnable(GL_BLEND);
+
+    if (drawBackground) {
+        s_gles2.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
+    }else {
+        s_gles2.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    }
+
+    // setup the |texture| and uniform values.
+    s_gles2.glActiveTexture(GL_TEXTURE0);
+    s_gles2.glBindTexture(GL_TEXTURE_2D, texture);
+    s_gles2.glUniform1i(mTextureSlot, 0);
+    s_gles2.glUniform1i(mComposeMode, HWC2_COMPOSITION_DEVICE);
+    s_gles2.glUniform2f(mTranslationSlot, dx, dy);
+
+    if (colorTransform) {
+        s_gles2.glUniformMatrix4fv(mColorTransform, 1, GL_FALSE, colorTransform);
+    } else {
+        s_gles2.glUniformMatrix4fv(mColorTransform, 1, GL_FALSE, kIdentityMatrix);
+    }
+
     s_gles2.glDrawElements(GL_TRIANGLES, kIndicesPerDraw, GL_UNSIGNED_BYTE,
                            (const GLvoid*)indexShift);
 
-    bool shouldDrawMask = false;
-    GLfloat scale[2];
-    s_gles2.glGetUniformfv(mProgram, mScaleSlot, scale);
-    GLfloat overlayScale[2];
-    {
-        gfxstream::base::AutoLock lock(mMaskLock);
-        if (wantOverlay && mHaveNewMask) {
-            // Create a texture from the mask image and make it
-            // available to be blended
-            GLint prevUnpackAlignment;
-            s_gles2.glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevUnpackAlignment);
-            s_gles2.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-            s_gles2.glBindTexture(GL_TEXTURE_2D, mMaskTexture);
-
-            s_gles2.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            s_gles2.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-            if (mShouldReallocateTexture) {
-                mMaskTextureWidth = mMaskWidth;
-                mMaskTextureHeight = mMaskHeight;
-                // mMaskPixels is actually not used here, we only use
-                // glTexImage2D here to resize the texture
-                s_gles2.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                                     mMaskTextureWidth, mMaskTextureHeight, 0,
-                                     GL_RGBA, GL_UNSIGNED_BYTE,
-                                     mMaskPixels.data());
-                mShouldReallocateTexture = false;
-            }
-
-            // Put the new texture in the center.
-            s_gles2.glTexSubImage2D(
-                    GL_TEXTURE_2D, 0, (mMaskTextureWidth - mMaskWidth) / 2,
-                    (mMaskTextureHeight - mMaskHeight) / 2, mMaskWidth,
-                    mMaskHeight, GL_RGBA, GL_UNSIGNED_BYTE, mMaskPixels.data());
-
-            s_gles2.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            s_gles2.glEnable(GL_BLEND);
-
-            s_gles2.glPixelStorei(GL_UNPACK_ALIGNMENT, prevUnpackAlignment);
-
-            mHaveNewMask = false;
-            mMaskIsValid = true;
-        }
-        shouldDrawMask = mMaskIsValid && wantOverlay;
-        // Scale the texture to only show that actual mask.
-        overlayScale[0] = static_cast<float>(mMaskTextureWidth) /
-                          static_cast<float>(mMaskWidth) * scale[0];
-        overlayScale[1] = static_cast<float>(mMaskTextureHeight) /
-                          static_cast<float>(mMaskHeight) * scale[1];
-    }
-
-    if (shouldDrawMask) {
-        if (mBlendResetNeeded) {
-            s_gles2.glEnable(GL_BLEND);
-            mBlendResetNeeded = false;
-        }
-        s_gles2.glUniform2f(mScaleSlot, overlayScale[0], overlayScale[1]);
-        // mMaskTexture should only be accessed on the thread where drawImpl is
-        // called, hence no need for lock.
-        s_gles2.glBindTexture(GL_TEXTURE_2D, mMaskTexture);
-        s_gles2.glDrawElements(GL_TRIANGLES, kIndicesPerDraw, GL_UNSIGNED_BYTE,
-                               (const GLvoid*)indexShift);
+    if (wantOverlay) {
+        mMaskLayer.draw(mProgram, mScaleSlot, indexShift);
         // Reset to the "normal" texture
         s_gles2.glBindTexture(GL_TEXTURE_2D, texture);
-        s_gles2.glUniform2f(mScaleSlot, scale[0], scale[1]);
     }
 
 #ifdef DEBUG_TEXTURE_DRAW
@@ -499,29 +462,15 @@ TextureDraw::~TextureDraw() {
     if (mVertexShader) {
         s_gles2.glDeleteShader(mVertexShader);
     }
-    if (mMaskTexture) {
-        s_gles2.glDeleteTextures(1, &mMaskTexture);
-    }
+    mMaskLayer.destroy();
 }
 
 void TextureDraw::setScreenMask(int width, int height, const uint8_t* rgbaData) {
-    gfxstream::base::AutoLock lock(mMaskLock);
-    if (width <= 0 || height <= 0 || rgbaData == nullptr) {
-        mMaskIsValid = false;
-        return;
-    }
+    mMaskLayer.update(width, height, rgbaData);
+}
 
-    mShouldReallocateTexture =
-            (width > mMaskTextureWidth) || (height > mMaskTextureHeight);
-    auto nextMaskTextureWidth = std::max(width, mMaskTextureWidth);
-    auto nextMaskTextureHeight = std::max(height, mMaskTextureHeight);
-    mMaskPixels.resize(nextMaskTextureWidth * nextMaskTextureHeight * 4);
-    // Save the data for use in the right context
-    std::copy(rgbaData, rgbaData + width * height * 4, mMaskPixels.begin());
-
-    mHaveNewMask = true;
-    mMaskWidth = width;
-    mMaskHeight = height;
+void TextureDraw::setScreenBackground(int width, int height, const uint8_t* rgbaData) {
+    mBackgroundLayer.update(width, height, rgbaData);
 }
 
 void TextureDraw::preDrawLayer() {
@@ -578,8 +527,8 @@ void TextureDraw::preDrawLayer() {
     }
 #endif
 
-   // set composition default
-    s_gles2.glUniform1i(mComposeMode, 2);
+    // set composition default
+    s_gles2.glUniform1i(mComposeMode, HWC2_COMPOSITION_DEVICE);
     s_gles2.glActiveTexture(GL_TEXTURE0);
     s_gles2.glUniform1i(mTextureSlot, 0);
     s_gles2.glEnable(GL_BLEND);
@@ -617,7 +566,6 @@ void TextureDraw::drawLayer(const ComposeLayer& layer, int frameWidth, int frame
     switch(layer.blendMode) {
         case HWC2_BLEND_MODE_NONE:
             s_gles2.glDisable(GL_BLEND);
-            mBlendResetNeeded = true;
             break;
         case HWC2_BLEND_MODE_PREMULTIPLIED:
             break;
@@ -694,7 +642,6 @@ void TextureDraw::drawLayer(const ComposeLayer& layer, int frameWidth, int frame
     }
     if (layer.blendMode != HWC2_BLEND_MODE_PREMULTIPLIED) {
         s_gles2.glEnable(GL_BLEND);
-        mBlendResetNeeded = false;
         s_gles2.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     }
 }
@@ -708,6 +655,121 @@ void TextureDraw::cleanupForDrawLayer() {
     s_gles2.glUniform2f(mScaleSlot, 1.0, 1.0);
     s_gles2.glUniform2f(mCoordTranslation, 0.0, 0.0);
     s_gles2.glUniform2f(mCoordScale, 1.0, 1.0);
+}
+
+TextureDraw::TexturedLayer::TexturedLayer()
+    : mTexture(0),
+      mTextureWidth(0),
+      mTextureHeight(0),
+      mTextureDirty(false),
+      mIsValid(false),
+      mShouldReallocateTexture(true) {}
+
+bool TextureDraw::TexturedLayer::create() {
+    // Create a texture handle for use with an overlay mask
+    s_gles2.glGenTextures(1, &mTexture);
+
+#ifdef DEBUG_TEXTURE_DRAW
+    GLenum err = s_gles2.glGetError();
+    if (err != GL_NO_ERROR) {
+        GFXSTREAM_ERROR("TexturedLayer::%s: Could not create layer texture error=0x%x\n",
+                        __FUNCTION__, err);
+    }
+#endif
+
+    return true;
+}
+
+void TextureDraw::TexturedLayer::update(int width, int height, const uint8_t* rgbaData) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (width <= 0 || height <= 0 || rgbaData == nullptr) {
+        mIsValid = false;
+        return;
+    }
+
+    mShouldReallocateTexture = (width > mTextureWidth) || (height > mTextureHeight);
+    auto nextMaskTextureWidth = std::max(width, mTextureWidth);
+    auto nextMaskTextureHeight = std::max(height, mTextureHeight);
+    mPixelData.resize(nextMaskTextureWidth * nextMaskTextureHeight * 4);
+    // Save the data for use in the right context
+    std::copy(rgbaData, rgbaData + width * height * 4, mPixelData.begin());
+
+    mTextureDirty = true;
+    mWidth = width;
+    mHeight = height;
+}
+
+void TextureDraw::TexturedLayer::destroy() {
+    if (mTexture) {
+        s_gles2.glDeleteTextures(1, &mTexture);
+    }
+}
+
+bool TextureDraw::TexturedLayer::preDraw() {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mTextureDirty) {
+        // Create a texture from the mask image and make it
+        // available to be blended
+        GLint prevUnpackAlignment;
+        s_gles2.glGetIntegerv(GL_UNPACK_ALIGNMENT, &prevUnpackAlignment);
+        s_gles2.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+        s_gles2.glBindTexture(GL_TEXTURE_2D, mTexture);
+
+        s_gles2.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        s_gles2.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+        if (mShouldReallocateTexture) {
+            mTextureWidth = mWidth;
+            mTextureHeight = mHeight;
+            // mPixelData is actually not used here, we only use
+            // glTexImage2D here to resize the texture
+            s_gles2.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, mTextureWidth, mTextureHeight, 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, mPixelData.data());
+            mShouldReallocateTexture = false;
+        }
+
+        // Put the new texture in the center.
+        s_gles2.glTexSubImage2D(GL_TEXTURE_2D, 0, (mTextureWidth - mWidth) / 2,
+                                (mTextureHeight - mHeight) / 2, mWidth, mHeight, GL_RGBA,
+                                GL_UNSIGNED_BYTE, mPixelData.data());
+
+        s_gles2.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        s_gles2.glEnable(GL_BLEND);
+
+        s_gles2.glPixelStorei(GL_UNPACK_ALIGNMENT, prevUnpackAlignment);
+
+        mTextureDirty = false;
+        mIsValid = true;
+    }
+
+    return mIsValid;
+}
+
+void TextureDraw::TexturedLayer::draw(GLuint program, GLint scaleSlot, intptr_t indexShift) {
+    GLfloat prevScale[2];
+    s_gles2.glGetUniformfv(program, scaleSlot, prevScale);
+    bool shouldDrawMask = preDraw();
+
+    if (shouldDrawMask) {
+        s_gles2.glEnable(GL_BLEND);
+
+        GLfloat overlayScale[2];
+        // Scale the texture to only show that actual mask.
+        overlayScale[0] =
+            static_cast<float>(mTextureWidth) / static_cast<float>(mWidth) * prevScale[0];
+        overlayScale[1] =
+            static_cast<float>(mTextureHeight) / static_cast<float>(mHeight) * prevScale[1];
+        s_gles2.glUniform2f(scaleSlot, overlayScale[0], overlayScale[1]);
+
+        // mTexture should only be accessed on the thread where drawImpl is
+        // called, hence no need for lock.
+        s_gles2.glBindTexture(GL_TEXTURE_2D, mTexture);
+        s_gles2.glDrawElements(GL_TRIANGLES, kIndicesPerDraw, GL_UNSIGNED_BYTE,
+                               (const GLvoid*)indexShift);
+
+        s_gles2.glUniform2f(scaleSlot, prevScale[0], prevScale[1]);
+    }
 }
 
 }  // namespace gl
