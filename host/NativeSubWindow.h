@@ -70,6 +70,13 @@ int moveSubWindow(FBNativeWindowType p_parent_window,
                   int height,
                   float dpr);
 
+void* getNativeDisplay();
+
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+// Retrieve metal layer from the view, to create a swapchain surface
+extern void* getMetalLayerFromView(void* view);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
