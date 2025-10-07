@@ -47,23 +47,26 @@ public:
     // clockwise rotation angle in degrees (clockwise in the GL Y-upwards
     // coordinate space; only supported values are 0, 90, 180, 270). |dx,dy| is
     // the translation of the image towards the origin.
-    bool draw(GLuint texture, float rotationDegrees, float dx, float dy) {
-        return drawImpl(texture, rotationDegrees, dx, dy, false);
+    bool draw(GLuint texture, float rotationDegrees, float dx, float dy,
+              const float* colorTransform) {
+        return drawImpl(texture, rotationDegrees, dx, dy, false, colorTransform);
     }
     // Same as 'draw()', but if an overlay has been provided, that overlay is
     // drawn on top of everything else.
-    bool drawWithOverlay(GLuint texture, float rotationDegrees, float dx, float dy) {
-        return drawImpl(texture, rotationDegrees, dx, dy, true);
+    bool drawWithOverlay(GLuint texture, float rotationDegrees, float dx, float dy,
+                         const float* colorTransform) {
+        return drawImpl(texture, rotationDegrees, dx, dy, true, colorTransform);
     }
 
-    void setScreenMask(int width, int height, const unsigned char* rgbaData);
+    void setScreenMask(int width, int height, const uint8_t* rgbaData);
     void drawLayer(const ComposeLayer& l, int frameWidth, int frameHeight,
                    int cbWidth, int cbHeight, GLuint texture);
     void prepareForDrawLayer();
     void cleanupForDrawLayer();
 
-private:
-    bool drawImpl(GLuint texture, float rotationDegrees, float dx, float dy, bool wantOverlay);
+   private:
+    bool drawImpl(GLuint texture, float rotationDegrees, float dx, float dy, bool wantOverlay,
+                  const float* colorTransform);
     void preDrawLayer();
 
     GLuint mVertexShader;
@@ -81,6 +84,7 @@ private:
     GLint mTranslationSlot;
     GLuint mVertexBuffer;
     GLuint mIndexBuffer;
+    GLuint mColorTransform;
 
     gfxstream::base::Lock mMaskLock;
     GLuint mMaskTexture;

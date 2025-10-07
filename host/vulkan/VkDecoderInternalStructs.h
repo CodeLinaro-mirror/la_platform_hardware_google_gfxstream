@@ -143,6 +143,11 @@ private:
     void* mAddr{nullptr};
 };
 
+struct BoundMemoryRange {
+   VkDeviceSize offset;
+   VkDeviceSize size;
+};
+
 // We always map the whole size on host.
 // This makes it much easier to implement
 // the memory map API.
@@ -176,6 +181,25 @@ struct MemoryInfo {
     std::optional<HandleType> boundBuffer;
     // ColorBuffer, provided via vkAllocateMemory().
     std::optional<HandleType> boundColorBuffer;
+    std::unordered_map<VkBuffer, BoundMemoryRange> bufferMemoryRanges;
+};
+
+// to track VkEvent states
+struct EventInfo {
+    VkDevice device = VK_NULL_HANDLE;
+    VkEvent boxed = VK_NULL_HANDLE;
+    // Tracks the most recently used queue for signaling. From
+    // https://registry.khronos.org/vulkan/specs/latest/man/html/VkEvent.html
+    //
+    // Events must not be used to insert a dependency between commands submitted to different
+    // queues.
+    //
+    // so snapshot loading must potentially use the same queue.
+
+    VkQueue boxed_queue = VK_NULL_HANDLE;
+    bool isSignaled{false};
+    bool isFromHost{false};
+    VkPipelineStageFlags flags{0};
 };
 
 struct InstanceInfo {
@@ -224,6 +248,8 @@ struct DeviceInfo {
 
 #ifdef _WIN32
     PFN_vkGetMemoryWin32HandleKHR getMemoryHandleFunc = nullptr;
+#elif defined(__ANDROID__)
+    PFN_vkGetMemoryAndroidHardwareBufferANDROID getMemoryHandleFunc = nullptr;
 #else
     PFN_vkGetMemoryFdKHR getMemoryHandleFunc = nullptr;
 #endif
@@ -400,8 +426,40 @@ struct SemaphoreInfo {
     // the waitable that tracking that host operation.
     std::optional<DeviceOpWaitable> latestUse;
 
+    bool isSignaled{false};        // only valid for binary semaphore
     uint64_t lastSignalValue = 0;  // Only valid when the virtual queue feature is enabled
     bool isTimelineSemaphore = false;
+
+    void onQueueSubmissionSignal() {
+        // From
+        // https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#synchronization-semaphores-signaling
+        //
+        //    When a batch is submitted to a queue via a queue submission and it
+        //    includes semaphores to be signaled, ... and defines semaphore
+        //    signal operations which set the semaphores to the signaled state.
+        //
+        // Track that here for snapshot handling:
+        if (!isTimelineSemaphore) {
+            isSignaled = true;
+        }
+    }
+
+    void onQueueSubmissionWait() {
+        // From
+        // https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#synchronization-semaphores-waiting
+        //
+        //    When a batch is submitted to a queue via a queue submission, and
+        //    it includes semaphores to be waited on, ... and defines semaphore
+        //    wait operations.
+        //
+        //    Such semaphore wait operations set the semaphores created with a
+        //    VkSemaphoreType of VK_SEMAPHORE_TYPE_BINARY to the unsignaled state.
+        //
+        // Track that here for snapshot handling:
+        if (!isTimelineSemaphore) {
+            isSignaled = false;
+        }
+    }
 };
 
 struct DescriptorSetLayoutInfo {
@@ -512,6 +570,9 @@ struct CommandBufferInfo {
     std::unordered_map<HandleType, VkImageLayout> cbLayouts;
     std::unordered_map<VkImage, VkImageLayout> imageLayouts;
 
+    std::unordered_set<VkEvent> eventsSet;
+    std::unordered_set<VkEvent> eventsReset;
+
     void reset() {
         subCmds.clear();
         computePipeline = VK_NULL_HANDLE;
@@ -556,6 +617,7 @@ struct InstanceObjects {
         std::unordered_map<VkQueue, QueueInfo> queues;
         std::unordered_map<VkRenderPass, RenderPassInfo> renderPasses;
         std::unordered_map<VkSampler, SamplerInfo> samplers;
+        std::unordered_map<VkEvent, EventInfo> events;
         std::unordered_map<VkSemaphore, SemaphoreInfo> semaphores;
         std::unordered_map<VkShaderModule, ShaderModuleInfo> shaderModules;
     };

@@ -209,10 +209,8 @@ CompositorVk::~CompositorVk() {
 }
 
 void CompositorVk::setUpGraphicsPipeline() {
-    const std::vector<uint32_t> vertSpvBuff(CompositorVkShader::compositorVertexShader,
-                                            std::end(CompositorVkShader::compositorVertexShader));
-    const std::vector<uint32_t> fragSpvBuff(CompositorVkShader::compositorFragmentShader,
-                                            std::end(CompositorVkShader::compositorFragmentShader));
+    const std::vector<uint32_t> vertSpvBuff = CompositorVkShader::compositorVertexShader;
+    const std::vector<uint32_t> fragSpvBuff = CompositorVkShader::compositorFragmentShader;
     const auto vertShaderMod = createShaderModule(m_vk, m_vkDevice, vertSpvBuff);
     const auto fragShaderMod = createShaderModule(m_vk, m_vkDevice, fragSpvBuff);
 
@@ -1065,6 +1063,8 @@ void CompositorVk::buildCompositionVk(const CompositionRequest& compositionReque
                         glm::scale(glm::mat4(1.0f),
                                    glm::vec3(texCoordScaleX, texCoordScaleY, 1.0f)) *
                         glm::rotate(glm::mat4(1.0f), texcoordRotation, glm::vec3(0.0f, 0.0f, 1.0f)),
+                    //TODO(b/420586022): Support color transformation on host composition
+                    .colorTransform = glm::mat4(1.0f),
                     .mode = glm::uvec4(static_cast<uint32_t>(layer.props.composeMode), 0, 0, 0),
                     .alpha =
                         glm::vec4(layer.props.alpha, layer.props.alpha, layer.props.alpha,
@@ -1371,7 +1371,8 @@ bool operator==(const CompositorVkBase::DescriptorSetContents& lhs,
                     lhs.binding1.alpha,              //
                     lhs.binding1.color,              //
                     lhs.binding1.positionTransform,  //
-                    lhs.binding1.texCoordTransform)  //
+                    lhs.binding1.texCoordTransform,  //
+                    lhs.binding1.colorTransform)     //
                      ==                              //
            std::tie(rhs.binding0.sampledImageId,     //
                     rhs.binding0.sampledImageView,   //
@@ -1379,7 +1380,8 @@ bool operator==(const CompositorVkBase::DescriptorSetContents& lhs,
                     rhs.binding1.alpha,              //
                     rhs.binding1.color,              //
                     rhs.binding1.positionTransform,  //
-                    rhs.binding1.texCoordTransform);
+                    rhs.binding1.texCoordTransform,  //
+                    rhs.binding1.colorTransform);
 }
 
 bool operator==(const CompositorVkBase::FrameDescriptorSetsContents& lhs,

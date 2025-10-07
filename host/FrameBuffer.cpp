@@ -102,6 +102,13 @@ using gfxstream::gl::YUVPlane;
 using gfxstream::vk::AstcEmulationMode;
 using gfxstream::vk::VkEmulation;
 
+// Utility functions to handle missing emulationGl without crashing.
+// It'll log the function name for better debugging of the cases where
+// emulationGl should not be needed, i.e. when vulkan composition is enabled.
+#define ENSURE_GL_EMULATION_VOID()  if (!m_emulationGl) { GFXSTREAM_ERROR("%s:%d - GL/EGL emulation not enabled.", __func__, __LINE__); return; }
+#define ENSURE_GL_EMULATION_VALUE(val)  if (!m_emulationGl) { GFXSTREAM_ERROR("%s:%d - GL/EGL emulation not enabled.", __func__, __LINE__); return (val); }
+#define ENSURE_GL_EMULATION_FATAL()  if (!m_emulationGl) { GFXSTREAM_FATAL("%s:%d - GL/EGL emulation not enabled.", __func__, __LINE__); }
+
 bool postOnlyOnMainThread() {
 #if defined(__APPLE__) && !defined(QEMU_NEXT)
     return true;
@@ -153,8 +160,7 @@ typedef std::unordered_map<uint64_t, CallbackMap> ProcOwnedCleanupCallbacks;
 class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<FrameBufferChangeEvent> {
    public:
     static std::unique_ptr<Impl> Create(FrameBuffer* framebuffer, uint32_t width, uint32_t height,
-                                        const FeatureSet& features, bool useSubWindow,
-                                        bool egl2egl);
+                                        const FeatureSet& features, bool useSubWindow);
 
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
@@ -307,7 +313,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     float getPy() const { return m_py; }
     int getZrot() const { return m_zRot; }
 
-    void setScreenMask(int width, int height, const unsigned char* rgbaData);
+    void setScreenMask(int width, int height, const uint8_t* rgbaData);
 
     void registerVulkanInstance(uint64_t id, const char* appName) const;
     void unregisterVulkanInstance(uint64_t id) const;
@@ -356,6 +362,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     int getDisplayPose(uint32_t displayId, int32_t* x, int32_t* y, uint32_t* w, uint32_t* h);
     int setDisplayPose(uint32_t displayId, int32_t x, int32_t y, uint32_t w, uint32_t h,
                        uint32_t dpi = 0);
+    int getDisplayColorTransform(uint32_t displayId, float outColorTransform[16]);
+    int setDisplayColorTransform(uint32_t displayId, const float colorTransform[16]);
     void getCombinedDisplaySize(int* w, int* h);
 
     HandleType getLastPostedColorBuffer() { return m_lastPostedColorBuffer; }
@@ -420,15 +428,6 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     void getNumConfigs(int* outNumConfigs, int* outNumAttribs);
     EGLint getConfigs(uint32_t bufferSize, GLuint* buffer);
     EGLint chooseConfig(EGLint* attribs, EGLint* configs, EGLint configsSize);
-
-    // Retrieve the GL strings of the underlying EGL/GLES implementation.
-    // On return, |*vendor|, |*renderer| and |*version| will point to strings
-    // that are owned by the instance (and must not be freed by the caller).
-    void getGLStrings(const char** vendor, const char** renderer, const char** version) const {
-        *vendor = m_graphicsAdapterVendor.c_str();
-        *renderer = m_graphicsAdapterName.c_str();
-        *version = m_graphicsApiVersion.c_str();
-    }
 
     // Create a new EmulatedEglContext instance for this display instance.
     // |p_config| is the index of one of the configs returned by getConfigs().
@@ -511,7 +510,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     // Call the implementation of eglDestroyImageKHR, return if succeeds or
     // not. Reference:
     // https://www.khronos.org/registry/egl/extensions/KHR/EGL_KHR_image_base.txt
-    EGLBoolean destroyEmulatedEglImage(HandleType image);
+    bool destroyEmulatedEglImage(HandleType image);
     // Copy the content of a EmulatedEglWindowSurface's Pbuffer to its attached
     // ColorBuffer. See the documentation for
     // EmulatedEglWindowSurface::flushColorBuffer().
@@ -579,6 +578,16 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     const gl::EGLDispatch* getEglDispatch();
     const gl::GLESv2Dispatch* getGles2Dispatch();
 #endif
+
+    // Retrieve the vendor info strings for the GPU driver used for the emulation.
+    // On return, |*vendor|, |*renderer| and |*version| will point to strings
+    // that are owned by the instance (and must not be freed by the caller).
+    // Uses Vulkan emulation's device info when EGL/GLES emulation is not enabled.
+    void getDeviceInfo(const char** vendor, const char** renderer, const char** version) const {
+        *vendor = m_graphicsAdapterVendor.c_str();
+        *renderer = m_graphicsAdapterName.c_str();
+        *version = m_graphicsApiVersion.c_str();
+    }
 
     const gfxstream::host::FeatureSet& getFeatures() const { return m_features; }
 
@@ -891,8 +900,10 @@ void MaybeIncreaseFileDescriptorSoftLimit() {
 std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* framebuffer,
                                                              uint32_t width, uint32_t height,
                                                              const FeatureSet& features,
-                                                             bool useSubWindow, bool egl2egl) {
+                                                             bool useSubWindow) {
     GFXSTREAM_DEBUG("FrameBuffer::Impl::initialize");
+
+    gfxstream::host::InitializeTracing();
 
     std::unique_ptr<Impl> impl(new Impl(framebuffer, width, height, features, useSubWindow));
     if (!impl) {
@@ -999,9 +1010,10 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
 
 #if GFXSTREAM_ENABLE_HOST_GLES
     // Do not initialize GL emulation if the guest is using ANGLE.
-    if (!impl->m_features.GuestVulkanOnly.enabled) {
+    const bool needEmulationGl = !impl->m_features.GuestVulkanOnly.enabled;
+    if (needEmulationGl) {
         impl->m_emulationGl =
-            EmulationGl::create(width, height, impl->m_features, useSubWindow, egl2egl);
+            EmulationGl::create(width, height, impl->m_features, useSubWindow);
         if (!impl->m_emulationGl) {
             GFXSTREAM_ERROR("Failed to initialize GL emulation.");
             return nullptr;
@@ -1045,8 +1057,8 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
         impl->m_graphicsApiVersion = impl->m_emulationVk->getGpuVersionString();
         impl->m_graphicsApiExtensions = impl->m_emulationVk->getInstanceExtensionsString();
         impl->m_graphicsDeviceExtensions = impl->m_emulationVk->getDeviceExtensionsString();
-    } else if (impl->m_emulationGl) {
 #if GFXSTREAM_ENABLE_HOST_GLES
+    } else if (impl->m_emulationGl) {
         impl->m_graphicsAdapterVendor = impl->m_emulationGl->getGlesVendor();
         impl->m_graphicsAdapterName = impl->m_emulationGl->getGlesRenderer();
         impl->m_graphicsApiVersion = impl->m_emulationGl->getGlesVersionString();
@@ -2486,9 +2498,7 @@ void FrameBuffer::Impl::flushReadPipeline(int displayId) {
 void FrameBuffer::Impl::ensureReadbackWorker() {
 #if GFXSTREAM_ENABLE_HOST_GLES
     if (!m_readbackWorker) {
-        if (!m_emulationGl) {
-            GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-        }
+        ENSURE_GL_EMULATION_VOID();
         m_readbackWorker = m_emulationGl->getReadbackWorker();
     }
 #endif
@@ -3085,9 +3095,7 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
 #if GFXSTREAM_ENABLE_HOST_GLES
     loadCollection(
         stream, &m_contexts, [this](Stream* stream) -> EmulatedEglContextMap::value_type {
-            if (!m_emulationGl) {
-                GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-            }
+            ENSURE_GL_EMULATION_FATAL();
 
             auto context = m_emulationGl->loadEmulatedEglContext(stream);
             auto contextHandle = context ? context->getHndl() : 0;
@@ -3122,10 +3130,7 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
 #if GFXSTREAM_ENABLE_HOST_GLES
         loadCollection(
             stream, &m_windows, [this](Stream* stream) -> EmulatedEglWindowSurfaceMap::value_type {
-                if (!m_emulationGl) {
-                    GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-                }
-
+                ENSURE_GL_EMULATION_FATAL();
                 auto window =
                     m_emulationGl->loadEmulatedEglWindowSurface(stream, m_colorbuffers, m_contexts);
 
@@ -3305,6 +3310,17 @@ int FrameBuffer::Impl::getDisplayPose(uint32_t displayId, int32_t* x, int32_t* y
 int FrameBuffer::Impl::setDisplayPose(uint32_t displayId, int32_t x, int32_t y, uint32_t w,
                                       uint32_t h, uint32_t dpi) {
     return get_gfxstream_multi_display_operations().set_display_pose(displayId, x, y, w, h, dpi);
+}
+
+int FrameBuffer::Impl::getDisplayColorTransform(uint32_t displayId, float outColorTransform[16]) {
+    return get_gfxstream_multi_display_operations().get_color_transform_matrix(displayId,
+                                                                               outColorTransform);
+}
+
+int FrameBuffer::Impl::setDisplayColorTransform(uint32_t displayId,
+                                                const float colorTransform[16]) {
+    return get_gfxstream_multi_display_operations().set_color_transform_matrix(displayId,
+                                                                               colorTransform);
 }
 
 void FrameBuffer::Impl::sweepColorBuffersLocked() {
@@ -3566,11 +3582,8 @@ HandleType FrameBuffer::Impl::getEmulatedEglWindowSurfaceColorBufferHandle(Handl
     return it->second;
 }
 
-void FrameBuffer::Impl::setScreenMask(int width, int height, const unsigned char* rgbaData) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-        return;
-    }
+void FrameBuffer::Impl::setScreenMask(int width, int height, const uint8_t* rgbaData) {
+    ENSURE_GL_EMULATION_VOID();
     m_emulationGl->mTextureDraw->setScreenMask(width, height, rgbaData);
 }
 
@@ -3612,9 +3625,7 @@ void FrameBuffer::Impl::createSharedTrivialContext(EGLContext* contextOut, EGLSu
     assert(contextOut);
     assert(surfOut);
 
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
+    ENSURE_GL_EMULATION_VOID();
 
     const EmulatedEglConfig* config = m_emulationGl->getEmulationEglConfigs().get(0 /* p_config */);
     if (!config) return;
@@ -3684,25 +3695,17 @@ bool FrameBuffer::Impl::setEmulatedEglWindowSurfaceColorBuffer(HandleType p_surf
 }
 
 std::string FrameBuffer::Impl::getEglString(EGLenum name) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-        return "";
-    }
+    ENSURE_GL_EMULATION_VALUE("");
     return m_emulationGl->getEglString(name);
 }
 
 std::string FrameBuffer::Impl::getGlString(EGLenum name) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-        return "";
-    }
+    ENSURE_GL_EMULATION_VALUE("");
     return m_emulationGl->getGlString(name);
 }
 
 GLESDispatchMaxVersion FrameBuffer::Impl::getMaxGlesVersion() {
-    if (!m_emulationGl) {
-        return GLES_DISPATCH_MAX_VERSION_2;
-    }
+    ENSURE_GL_EMULATION_VALUE(GLES_DISPATCH_MAX_VERSION_2);
     return m_emulationGl->getGlesMaxDispatchVersion();
 }
 
@@ -3714,45 +3717,29 @@ std::string FrameBuffer::Impl::getGlesExtensionsString() const {
 }
 
 EGLint FrameBuffer::Impl::getEglVersion(EGLint* major, EGLint* minor) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-        return EGL_FALSE;
-    }
-
+    ENSURE_GL_EMULATION_VALUE(EGL_FALSE);
     m_emulationGl->getEglVersion(major, minor);
     return EGL_TRUE;
 }
 
 void FrameBuffer::Impl::getNumConfigs(int* outNumConfigs, int* outNumAttribs) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VOID();
     m_emulationGl->getEmulationEglConfigs().getPackInfo(outNumConfigs, outNumAttribs);
 }
 
 EGLint FrameBuffer::Impl::getConfigs(uint32_t bufferSize, GLuint* buffer) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(0);
     return m_emulationGl->getEmulationEglConfigs().packConfigs(bufferSize, buffer);
 }
 
 EGLint FrameBuffer::Impl::chooseConfig(EGLint* attribs, EGLint* configs, EGLint configsSize) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(0);
     return m_emulationGl->getEmulationEglConfigs().chooseConfig(attribs, configs, configsSize);
 }
 
 HandleType FrameBuffer::Impl::createEmulatedEglContext(int config, HandleType shareContextHandle,
                                                        GLESApi version) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(0);
     AutoLock mutex(m_lock);
     gfxstream::base::AutoWriteLock contextLock(m_contextStructureLock);
     // Hold the ColorBuffer map lock so that the new handle won't collide with a ColorBuffer handle.
@@ -3787,9 +3774,11 @@ HandleType FrameBuffer::Impl::createEmulatedEglContext(int config, HandleType sh
         m_procOwnedEmulatedEglContexts[puid].insert(contextHandle);
     } else {  // legacy path to manage context lifetime by threads
         if (!tinfo->m_glInfo) {
-            GFXSTREAM_FATAL("RenderThreadGL not available.");
+            GFXSTREAM_ERROR("RenderThreadGL not available.");
         }
-        tinfo->m_glInfo->m_contextSet.insert(contextHandle);
+        else {
+            tinfo->m_glInfo->m_contextSet.insert(contextHandle);
+        }
     }
 
     return contextHandle;
@@ -3821,10 +3810,7 @@ void FrameBuffer::Impl::destroyEmulatedEglContext(HandleType contextHandle) {
 
 HandleType FrameBuffer::Impl::createEmulatedEglWindowSurface(int p_config, int p_width,
                                                              int p_height) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(0);
     AutoLock mutex(m_lock);
     // Hold the ColorBuffer map lock so that the new handle won't collide with a ColorBuffer handle.
     AutoLock colorBufferMapLock(m_colorBufferMapLock);
@@ -3900,8 +3886,22 @@ std::vector<HandleType> FrameBuffer::Impl::destroyEmulatedEglWindowSurfaceLocked
 
 void FrameBuffer::Impl::createEmulatedEglFenceSync(EGLenum type, int destroyWhenSignaled,
                                                    uint64_t* outSync, uint64_t* outSyncThread) {
+    if (outSync) {
+        *outSync = 0;
+    }
+    if (outSyncThread) {
+        *outSyncThread = reinterpret_cast<uint64_t>(SyncThread::get());
+    }
+
     if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
+        // Avoid spamming the logs
+        // TODO(b/389646068): avoid calls to this function in GuestAngle mode
+        static bool logged_once = false;
+        if(!logged_once) {
+            GFXSTREAM_ERROR("%s !GL", __PRETTY_FUNCTION__);
+            logged_once = true;
+        }
+        return;
     }
 
     // TODO(b/233939967): move RenderThreadInfoGl usage to EmulationGl.
@@ -3919,15 +3919,8 @@ void FrameBuffer::Impl::createEmulatedEglFenceSync(EGLenum type, int destroyWhen
     }
 
     auto sync = m_emulationGl->createEmulatedEglFenceSync(type, destroyWhenSignaled);
-    if (!sync) {
-        return;
-    }
-
-    if (outSync) {
+    if (sync && outSync) {
         *outSync = (uint64_t)(uintptr_t)sync.release();
-    }
-    if (outSyncThread) {
-        *outSyncThread = reinterpret_cast<uint64_t>(SyncThread::get());
     }
 }
 
@@ -4024,31 +4017,24 @@ void FrameBuffer::Impl::drainGlRenderThreadSurfaces() {
 }
 
 EmulationGl& FrameBuffer::Impl::getEmulationGl() {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
+    ENSURE_GL_EMULATION_FATAL();
     return *m_emulationGl;
 }
 
 VkEmulation& FrameBuffer::Impl::getEmulationVk() {
     if (!m_emulationVk) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
+        GFXSTREAM_FATAL("Vulkan emulation is not enabled.");
     }
     return *m_emulationVk;
 }
 
 EGLDisplay FrameBuffer::Impl::getDisplay() const {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
+    ENSURE_GL_EMULATION_VALUE(nullptr);
     return m_emulationGl->mEglDisplay;
 }
 
 EGLSurface FrameBuffer::Impl::getWindowSurface() const {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(0);
     if (!m_emulationGl->mWindowSurface) {
         return EGL_NO_SURFACE;
     }
@@ -4060,24 +4046,17 @@ EGLSurface FrameBuffer::Impl::getWindowSurface() const {
 }
 
 EGLContext FrameBuffer::Impl::getContext() const {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
+    ENSURE_GL_EMULATION_VALUE(0);
     return m_emulationGl->mEglContext;
 }
 
 EGLContext FrameBuffer::Impl::getConfig() const {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
+    ENSURE_GL_EMULATION_VALUE(nullptr);
     return m_emulationGl->mEglConfig;
 }
 
 EGLContext FrameBuffer::Impl::getGlobalEGLContext() const {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(0);
     if (!m_emulationGl->mPbufferSurface) {
         GFXSTREAM_FATAL("FrameBuffer pbuffer surface not available.");
     }
@@ -4097,35 +4076,23 @@ EmulatedEglWindowSurfacePtr FrameBuffer::Impl::getWindowSurface_locked(HandleTyp
 }
 
 TextureDraw* FrameBuffer::Impl::getTextureDraw() const {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(nullptr);
     return m_emulationGl->mTextureDraw.get();
 }
 
 bool FrameBuffer::Impl::isFastBlitSupported() const {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(false);
     return m_emulationGl->isFastBlitSupported();
 }
 
 void FrameBuffer::Impl::disableFastBlitForTesting() {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VOID();
     m_emulationGl->disableFastBlitForTesting();
 }
 
 HandleType FrameBuffer::Impl::createEmulatedEglImage(HandleType contextHandle, EGLenum target,
                                                      GLuint buffer) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+    ENSURE_GL_EMULATION_VALUE(0);
     AutoLock mutex(m_lock);
 
     EmulatedEglContext* context = nullptr;
@@ -4135,7 +4102,7 @@ HandleType FrameBuffer::Impl::createEmulatedEglImage(HandleType contextHandle, E
         auto it = m_contexts.find(contextHandle);
         if (it == m_contexts.end()) {
             GFXSTREAM_ERROR("Failed to find EmulatedEglContext:%d", contextHandle);
-            return false;
+            return 0;
         }
 
         context = it->second.get();
@@ -4145,7 +4112,7 @@ HandleType FrameBuffer::Impl::createEmulatedEglImage(HandleType contextHandle, E
                                                        reinterpret_cast<EGLClientBuffer>(buffer));
     if (!image) {
         GFXSTREAM_ERROR("Failed to create EmulatedEglImage");
-        return false;
+        return 0;
     }
 
     HandleType imageHandle = image->getHandle();
@@ -4160,11 +4127,8 @@ HandleType FrameBuffer::Impl::createEmulatedEglImage(HandleType contextHandle, E
     return imageHandle;
 }
 
-EGLBoolean FrameBuffer::Impl::destroyEmulatedEglImage(HandleType imageHandle) {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
-
+bool FrameBuffer::Impl::destroyEmulatedEglImage(HandleType imageHandle) {
+    ENSURE_GL_EMULATION_VALUE(false);
     AutoLock mutex(m_lock);
 
     auto imageIt = m_images.find(imageHandle);
@@ -4186,7 +4150,7 @@ EGLBoolean FrameBuffer::Impl::destroyEmulatedEglImage(HandleType imageHandle) {
         // the lifetime of a process. It will be cleaned up by
         // cleanupProcGLObjects(puid) when the process is dead.
     }
-    return success;
+    return (success == EGL_TRUE);
 }
 
 bool FrameBuffer::Impl::flushEmulatedEglWindowSurfaceColorBuffer(HandleType p_surface) {
@@ -4278,9 +4242,7 @@ bool FrameBuffer::Impl::invalidateColorBufferForGl(HandleType colorBufferHandle)
 }
 
 ContextHelper* FrameBuffer::Impl::getPbufferSurfaceContextHelper() const {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
+    ENSURE_GL_EMULATION_VALUE(nullptr);
     if (!m_emulationGl->mPbufferSurface) {
         GFXSTREAM_FATAL("EGL emulation pbuffer surface not available.");
     }
@@ -4527,17 +4489,13 @@ void FrameBuffer::Impl::asyncWaitForGpuWithCb(uint64_t eglsync, FenceCompletionC
 }
 
 const gl::GLESv2Dispatch* FrameBuffer::Impl::getGles2Dispatch() {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
+    ENSURE_GL_EMULATION_VALUE(nullptr);
 
     return m_emulationGl->getGles2Dispatch();
 }
 
 const gl::EGLDispatch* FrameBuffer::Impl::getEglDispatch() {
-    if (!m_emulationGl) {
-        GFXSTREAM_FATAL("GL/EGL emulation not enabled.");
-    }
+    ENSURE_GL_EMULATION_VALUE(nullptr);
 
     return m_emulationGl->getEglDispatch();
 }
@@ -4556,8 +4514,7 @@ FrameBuffer::Impl::getRepresentativeColorBufferMemoryTypeInfo() const {
 FrameBuffer::~FrameBuffer() = default;
 
 /*static*/
-bool FrameBuffer::initialize(int width, int height, const FeatureSet& features, bool useSubWindow,
-                             bool egl2egl) {
+bool FrameBuffer::initialize(int width, int height, const FeatureSet& features, bool useSubWindow) {
     GFXSTREAM_DEBUG("FrameBuffer::initialize()");
 
     if (sFrameBuffer) {
@@ -4567,7 +4524,7 @@ bool FrameBuffer::initialize(int width, int height, const FeatureSet& features, 
     std::unique_ptr<FrameBuffer> framebuffer(new FrameBuffer());
 
     framebuffer->mImpl = FrameBuffer::Impl::Create(framebuffer.get(), width, height, features,
-                                                   useSubWindow, egl2egl);
+                                                   useSubWindow);
     if (!framebuffer->mImpl) {
         GFXSTREAM_ERROR("Failed to initialize FrameBuffer().");
         return false;
@@ -4801,7 +4758,7 @@ float FrameBuffer::getPy() const { return mImpl->getPy(); }
 
 int FrameBuffer::getZrot() const { return mImpl->getZrot(); }
 
-void FrameBuffer::setScreenMask(int width, int height, const unsigned char* rgbaData) {
+void FrameBuffer::setScreenMask(int width, int height, const uint8_t* rgbaData) {
     mImpl->setScreenMask(width, height, rgbaData);
 }
 
@@ -4871,6 +4828,14 @@ int FrameBuffer::getDisplayPose(uint32_t displayId, int32_t* x, int32_t* y, uint
 int FrameBuffer::setDisplayPose(uint32_t displayId, int32_t x, int32_t y, uint32_t w, uint32_t h,
                                 uint32_t dpi) {
     return mImpl->setDisplayPose(displayId, x, y, w, h, dpi);
+}
+
+int FrameBuffer::getDisplayColorTransform(uint32_t displayId, float outColorTransform[16]) {
+    return mImpl->getDisplayColorTransform(displayId, outColorTransform);
+}
+
+int FrameBuffer::setDisplayColorTransform(uint32_t displayId, const float colorTransform[16]) {
+    return mImpl->setDisplayColorTransform(displayId, colorTransform);
 }
 
 HandleType FrameBuffer::getLastPostedColorBuffer() { return mImpl->getLastPostedColorBuffer(); }
@@ -5005,9 +4970,9 @@ EGLint FrameBuffer::chooseConfig(EGLint* attribs, EGLint* configs, EGLint config
     return mImpl->chooseConfig(attribs, configs, configsSize);
 }
 
-void FrameBuffer::getGLStrings(const char** vendor, const char** renderer,
+void FrameBuffer::getDeviceInfo(const char** vendor, const char** renderer,
                                const char** version) const {
-    mImpl->getGLStrings(vendor, renderer, version);
+    mImpl->getDeviceInfo(vendor, renderer, version);
 }
 
 HandleType FrameBuffer::createEmulatedEglContext(int p_config, HandleType p_share,

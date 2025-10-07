@@ -49,8 +49,7 @@ void RenderLibImpl::setLogger(gfxstream_log_callback_t callback) {
 
     // Set log level based on env vars
     std::optional<gfxstream_logging_level> logLevel;
-    if (gfxstream::base::getEnvironmentVariable("GFXSTREAM_LOG_VERBOSE") ==
-        "1") {  // TODO0: set from qemu side with -verbose
+    if (gfxstream::base::getEnvironmentVariable("GFXSTREAM_LOG_VERBOSE") == "1") {
         logLevel = GFXSTREAM_LOGGING_LEVEL_VERBOSE;
     } else {
         const char* ENVVAR_GFXSTREAM_LOG_LEVEL = "GFXSTREAM_LOG_LEVEL";
@@ -141,13 +140,13 @@ bool RenderLibImpl::getOpt(RenderOpt* opt) {
 
 RendererPtr RenderLibImpl::initRenderer(int width, int height,
                                         const gfxstream::host::FeatureSet& features,
-                                        bool useSubWindow, bool egl2egl) {
+                                        bool useSubWindow) {
     if (!mRenderer.expired()) {
         return nullptr;
     }
 
     const auto res = std::make_shared<RendererImpl>();
-    if (!res->initialize(width, height, features, useSubWindow, egl2egl)) {
+    if (!res->initialize(width, height, features, useSubWindow)) {
         return nullptr;
     }
     mRenderer = res;

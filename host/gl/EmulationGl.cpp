@@ -26,13 +26,16 @@
 #include "OpenGLESDispatch/GLESv2Dispatch.h"
 #include "OpenGLESDispatch/OpenGLDispatchLoader.h"
 #include "RenderThreadInfoGl.h"
-#include "gfxstream/misc/StringUtils.h"
+#include "gfxstream/ThreadAnnotations.h"
 #include "gfxstream/common/logging.h"
 #include "gfxstream/host/renderer_operations.h"
+#include "gfxstream/misc/StringUtils.h"
 
 namespace gfxstream {
 namespace gl {
 namespace {
+
+#ifdef ENABLE_GFXSTREAM_DEBUG
 
 static void EGLAPIENTRY EglDebugCallback(EGLenum error,
                                          const char *command,
@@ -52,6 +55,8 @@ static void GL_APIENTRY GlDebugCallback(GLenum source,
                                         const void *userParam) {
     GFXSTREAM_DEBUG("message:%s", message);
 }
+
+#endif // ENABLE_GFXSTREAM_DEBUG
 
 static const GLint kGles2ContextAttribsESOrGLCompat[] = {
     EGL_CONTEXT_CLIENT_VERSION, 2,  //
@@ -76,11 +81,18 @@ static const GLint kGles3ContextAttribsCoreGL[] = {
 };
 
 static bool validateGles2Context(EGLDisplay display) {
-    const GLint configAttribs[] = {
-        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_NONE,
-    };
+    const GLint configAttribs[] = {// Request at least 8 bits for Red/Green/Blue
+                                   EGL_RED_SIZE,
+                                   8,
+                                   EGL_GREEN_SIZE,
+                                   8,
+                                   EGL_BLUE_SIZE,
+                                   8,
+                                   EGL_SURFACE_TYPE,
+                                   EGL_PBUFFER_BIT,
+                                   EGL_RENDERABLE_TYPE,
+                                   EGL_OPENGL_ES2_BIT,
+                                   EGL_NONE};
 
     EGLint numConfigs = 0;
     EGLConfig config;
@@ -203,7 +215,7 @@ static std::optional<EGLConfig> getEmulationEglConfig(EGLDisplay display, bool a
 
 std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height,
                                                  const gfxstream::host::FeatureSet& features,
-                                                 bool allowWindowSurface, bool egl2egl) {
+                                                 bool allowWindowSurface) {
     // Loads the glestranslator function pointers.
     if (!LazyLoadedEGLDispatch::get()) {
         GFXSTREAM_ERROR("Failed to load EGL dispatch.");
@@ -219,9 +231,8 @@ std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height
     }
 
     if (s_egl.eglUseOsEglApi) {
-        s_egl.eglUseOsEglApi(egl2egl, EGL_FALSE);
+        s_egl.eglUseOsEglApi(features.EglOnEgl.enabled, EGL_FALSE);
     }
-
 
     std::unique_ptr<EmulationGl> emulationGl(new EmulationGl());
 
@@ -366,27 +377,6 @@ std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height
         /*height=*/1,
         std::move(pbufferSurfaceGl));
 
-    emulationGl->mEmulatedEglConfigs =
-        std::make_unique<EmulatedEglConfigList>(emulationGl->mEglDisplay,
-                                                emulationGl->mGlesDispatchMaxVersion,
-                                                emulationGl->mFeatures);
-    if (emulationGl->mEmulatedEglConfigs->empty()) {
-        GFXSTREAM_ERROR("Failed to initialize emulated configs.");
-        return nullptr;
-    }
-
-    const bool hasEsOrEs2Context =
-        std::any_of(emulationGl->mEmulatedEglConfigs->begin(),
-                    emulationGl->mEmulatedEglConfigs->end(),
-                    [](const EmulatedEglConfig& config) {
-                        const GLint renderableType = config.getRenderableType();
-                        return renderableType & (EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT);
-                    });
-    if (!hasEsOrEs2Context) {
-        GFXSTREAM_ERROR("Failed to find any usable guest EGL configs.");
-        return nullptr;
-    }
-
     RecursiveScopedContextBind contextBind(pbufferSurfaceGlPtr->getContextHelper());
     if (!contextBind.isOk()) {
         GFXSTREAM_ERROR("Failed to make pbuffer context and surface current");
@@ -445,6 +435,25 @@ std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height
     emulationGl->mGlesRenderer = (const char*)s_gles2.glGetString(GL_RENDERER);
     emulationGl->mGlesVersion = (const char*)s_gles2.glGetString(GL_VERSION);
     emulationGl->mGlesExtensions = (const char*)s_gles2.glGetString(GL_EXTENSIONS);
+
+    emulationGl->mEmulatedEglConfigs = std::make_unique<EmulatedEglConfigList>(
+        emulationGl->mEglDisplay, emulationGl->mGlesDispatchMaxVersion, emulationGl->mFeatures,
+        emulationGl->mGlesVendor);
+    if (emulationGl->mEmulatedEglConfigs->empty()) {
+        GFXSTREAM_ERROR("Failed to initialize emulated configs.");
+        return nullptr;
+    }
+
+    const bool hasEsOrEs2Context =
+        std::any_of(emulationGl->mEmulatedEglConfigs->begin(),
+                    emulationGl->mEmulatedEglConfigs->end(), [](const EmulatedEglConfig& config) {
+                        const GLint renderableType = config.getRenderableType();
+                        return renderableType & (EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT);
+                    });
+    if (!hasEsOrEs2Context) {
+        GFXSTREAM_ERROR("Failed to find any usable guest EGL configs.");
+        return nullptr;
+    }
 
     s_gles2.glGetError();
     GLint numDeviceUuids = 0;
@@ -702,12 +711,13 @@ std::unique_ptr<ColorBufferGl> EmulationGl::createColorBuffer(uint32_t width, ui
                                                               HandleType handle) {
     return ColorBufferGl::create(mEglDisplay, width, height, internalFormat, frameworkFormat,
                                  handle, getColorBufferContextHelper(), mTextureDraw.get(),
-                                 isFastBlitSupported(), mFeatures);
+                                 isFastBlitSupported(), mFeatures, mPixelReadFormats);
 }
 
 std::unique_ptr<ColorBufferGl> EmulationGl::loadColorBuffer(gfxstream::Stream* stream) {
     return ColorBufferGl::onLoad(stream, mEglDisplay, getColorBufferContextHelper(),
-                                 mTextureDraw.get(), isFastBlitSupported(), mFeatures);
+                                 mTextureDraw.get(), isFastBlitSupported(), mFeatures,
+                                 mPixelReadFormats);
 }
 
 std::unique_ptr<EmulatedEglContext> EmulationGl::createEmulatedEglContext(

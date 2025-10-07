@@ -61,6 +61,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef __ANDROID__
+#include <vndk/hardware_buffer.h>
+#endif
+
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #include <vulkan/vulkan_beta.h> // for MoltenVK portability extensions
@@ -78,18 +82,19 @@
 namespace gfxstream {
 namespace vk {
 
+using gfxstream::ExternalObjectManager;
+using gfxstream::VulkanInfo;
 using gfxstream::base::AutoLock;
-using gfxstream::base::Lock;
 using gfxstream::base::DescriptorType;
+using gfxstream::base::Lock;
 using gfxstream::base::MetricEventBadPacketLength;
 using gfxstream::base::MetricEventDuplicateSequenceNum;
 using gfxstream::base::MetricEventVulkanOutOfMemory;
 using gfxstream::base::Optional;
 using gfxstream::base::SharedMemory;
 using gfxstream::base::StaticLock;
+using gfxstream::base::UdmabufCreator;
 using gfxstream::host::GfxApiLogger;
-using gfxstream::ExternalObjectManager;
-using gfxstream::VulkanInfo;
 
 // Blob mem
 #define STREAM_BLOB_MEM_GUEST 1
@@ -174,6 +179,7 @@ static constexpr uint64_t kPageSizeforBlob = 4096;
 static constexpr uint64_t kPageMaskForBlob = ~(0xfff);
 
 static std::atomic<uint64_t> sNextHostBlobId{1};
+static std::atomic<uint64_t> sUniqueShmemId = 0;
 
 class VkDecoderGlobalState::Impl {
    public:
@@ -219,6 +225,7 @@ class VkDecoderGlobalState::Impl {
         mDeviceInfo.clear();
         mImageInfo.clear();
         mImageViewInfo.clear();
+        mEventInfo.clear();
         mSamplerInfo.clear();
         mCommandBufferInfo.clear();
         mCommandPoolInfo.clear();
@@ -252,7 +259,132 @@ class VkDecoderGlobalState::Impl {
 
     const gfxstream::host::FeatureSet& getFeatures() const { return m_vkEmulation->getFeatures(); }
 
-    StateBlock createSnapshotStateBlock(VkDevice unboxed_device) REQUIRES(mMutex) {
+    void loadEvents(gfxstream::Stream* stream) REQUIRES(mMutex) {
+        const uint32_t sz = stream->getBe32();
+
+        std::unordered_map<VkQueue, QueueInfo*> q2Info;
+        for (auto& [unboxed_queue, queueinfo] : mQueueInfo) {
+            q2Info[queueinfo.boxed] = &queueinfo;
+        }
+        for (uint32_t i = 0; i < sz; ++i) {
+            const VkEvent boxed_event = reinterpret_cast<VkEvent>(stream->getBe64());
+            const VkEvent unboxed_event = unbox_VkEvent(boxed_event);
+            const VkQueue boxed_queue = reinterpret_cast<VkQueue>(stream->getBe64());
+            const uint64_t flags = stream->getBe64();
+            const bool isFromHost = stream->getBe32() ? true : false;
+
+            VkDevice unboxed_device{};
+            VkQueue unboxed_queue_of_event{};
+            int queueFamilyIndex = -1;
+            if (q2Info.find(boxed_queue) == q2Info.end()) {
+                continue;
+            }
+
+            EventInfo& eventInfo = mEventInfo[unboxed_event];
+            eventInfo.isSignaled = true;
+            eventInfo.flags = flags;
+            eventInfo.isFromHost = isFromHost;
+            eventInfo.boxed_queue = boxed_queue;
+
+            if (isFromHost) {
+                const auto& device = mEventInfo[unboxed_event].device;
+                const auto& deviceInfo = gfxstream::base::find(mDeviceInfo, device);
+                VulkanDispatch* dvk = dispatch_VkDevice(deviceInfo->boxed);
+                dvk->vkSetEvent(device, unboxed_event);
+                continue;
+            }
+
+            auto& queueinfo = *q2Info[boxed_queue];
+            unboxed_device = queueinfo.device;
+            unboxed_queue_of_event = unboxed_to_boxed_VkQueue(boxed_queue);
+            queueFamilyIndex = queueinfo.queueFamilyIndex;
+            StateBlock stateBlock =
+                createSnapshotStateBlock(unboxed_device, unboxed_queue_of_event, queueFamilyIndex);
+            setEventInQueue(&stateBlock, unboxed_event, flags);
+            releaseSnapshotStateBlock(&stateBlock);
+        }
+    }
+
+    void saveEvents(gfxstream::Stream* stream) REQUIRES(mMutex) {
+        uint32_t sz = 0;
+        for (const auto& [event, eventInfo] : mEventInfo) {
+            if (eventInfo.isSignaled) {
+                ++sz;
+            }
+        }
+        stream->putBe32(sz);
+        for (const auto& [event, eventInfo] : mEventInfo) {
+            if (eventInfo.isSignaled) {
+                stream->putBe64(reinterpret_cast<uint64_t>(eventInfo.boxed));
+                stream->putBe64(reinterpret_cast<uint64_t>(eventInfo.boxed_queue));
+                stream->putBe64(eventInfo.flags);
+                stream->putBe32(eventInfo.isFromHost ? 1 : 0);
+            }
+        }
+    }
+
+    void saveSemaphores(gfxstream::Stream* stream) REQUIRES(mMutex) {
+        uint32_t sz = 0;
+        for (const auto& [semaphore, semaphoreInfo] : mSemaphoreInfo) {
+            if (semaphoreInfo.isSignaled) {
+                ++sz;
+            }
+        }
+        stream->putBe32(sz);
+        for (const auto& [semaphore, semaphoreInfo] : mSemaphoreInfo) {
+            if (semaphoreInfo.isSignaled) {
+                stream->putBe64(reinterpret_cast<uint64_t>(semaphoreInfo.boxed));
+            }
+        }
+    }
+
+    void loadSemaphores(gfxstream::Stream* stream) REQUIRES(mMutex) {
+        const uint32_t sz = stream->getBe32();
+        for (uint32_t i = 0; i < sz; ++i) {
+            const VkSemaphore boxed_semaphore = reinterpret_cast<VkSemaphore>(stream->getBe64());
+            const VkSemaphore unboxed_semaphore = unbox_VkSemaphore(boxed_semaphore);
+
+            SemaphoreInfo& semaphoreInfo = mSemaphoreInfo[unboxed_semaphore];
+            semaphoreInfo.isSignaled = true;
+
+            StateBlock stateBlock = createSnapshotStateBlock(semaphoreInfo.device);
+            signalSemaphore(&stateBlock, unboxed_semaphore);
+            releaseSnapshotStateBlock(&stateBlock);
+        }
+    }
+
+    void processEventsForSubmittedCommandBuffer(VkQueue queue, VkCommandBuffer commandBuffer) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto* cmdBufferInfo = gfxstream::base::find(mCommandBufferInfo, commandBuffer);
+        if (!cmdBufferInfo) {
+            GFXSTREAM_WARNING("Failed to find unboxed command buffer: 0x%llx boxed 0x%llx",
+                              reinterpret_cast<unsigned long long>(commandBuffer),
+                              reinterpret_cast<unsigned long long>(
+                                  unboxed_to_boxed_VkCommandBuffer(commandBuffer)));
+            return;
+        }
+        for (auto event : cmdBufferInfo->eventsSet) {
+            auto* eventInfo = gfxstream::base::find(mEventInfo, event);
+            if (eventInfo) {
+                eventInfo->isSignaled = true;
+                eventInfo->boxed_queue = mQueueInfo[queue].boxed;
+            }
+        }
+        cmdBufferInfo->eventsSet.clear();
+        for (auto event : cmdBufferInfo->eventsReset) {
+            auto* eventInfo = gfxstream::base::find(mEventInfo, event);
+            if (eventInfo) {
+                eventInfo->isSignaled = false;
+                eventInfo->boxed_queue = VK_NULL_HANDLE;
+                eventInfo->flags = 0;
+            }
+        }
+        cmdBufferInfo->eventsReset.clear();
+    }
+
+    StateBlock createSnapshotStateBlock(VkDevice unboxed_device,
+                                        VkQueue unboxed_queue = VK_NULL_HANDLE,
+                                        int queueFamilyIndex = -1) REQUIRES(mMutex) {
         const auto& device = unboxed_device;
         const auto& deviceInfo = gfxstream::base::find(mDeviceInfo, device);
         const auto physicalDevice = deviceInfo->physicalDevice;
@@ -271,27 +403,31 @@ class VkDecoderGlobalState::Impl {
             .commandPool = VK_NULL_HANDLE,
         };
 
-        uint32_t queueFamilyCount = 0;
-        ivk->vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
-        std::vector<VkQueueFamilyProperties> queueFamilyProps(queueFamilyCount);
-        ivk->vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount,
-                                                      queueFamilyProps.data());
-        uint32_t queueFamilyIndex = 0;
-        for (auto queue : deviceInfo->queues) {
-            int idx = queue.first;
-            if ((queueFamilyProps[idx].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
-                continue;
+        if (unboxed_queue == VK_NULL_HANDLE) {
+            uint32_t queueFamilyCount = 0;
+            ivk->vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount,
+                                                          nullptr);
+            std::vector<VkQueueFamilyProperties> queueFamilyProps(queueFamilyCount);
+            ivk->vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount,
+                                                          queueFamilyProps.data());
+            for (auto queue : deviceInfo->queues) {
+                int idx = queue.first;
+                if ((queueFamilyProps[idx].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
+                    continue;
+                }
+                stateBlock.queue = queue.second[0];
+                queueFamilyIndex = idx;
+                break;
             }
-            stateBlock.queue = queue.second[0];
-            queueFamilyIndex = idx;
-            break;
+        } else {
+            stateBlock.queue = unboxed_queue;
         }
 
         VkCommandPoolCreateInfo commandPoolCi = {
             VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             0,
             VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            queueFamilyIndex,
+            static_cast<uint32_t>(queueFamilyIndex),
         };
         dvk->vkCreateCommandPool(device, &commandPoolCi, nullptr, &stateBlock.commandPool);
         return stateBlock;
@@ -423,18 +559,36 @@ class VkDecoderGlobalState::Impl {
                 unboxed_to_boxed_non_dispatchable_VkDescriptorPool(descriptorPoolIte.first);
             sortedBoxedDescriptorPools.push_back(boxed);
         }
+        int dpoolcount = sortedBoxedDescriptorPools.size();
         std::sort(sortedBoxedDescriptorPools.begin(), sortedBoxedDescriptorPools.end());
+        GFXSTREAM_DEBUG("snapshot save: %d descriptor pools", dpoolcount);
         for (const auto& boxedDescriptorPool : sortedBoxedDescriptorPools) {
             auto unboxedDescriptorPool = unbox_VkDescriptorPool(boxedDescriptorPool);
             const DescriptorPoolInfo& poolInfo = mDescriptorPoolInfo[unboxedDescriptorPool];
 
-            for (uint64_t poolId : poolInfo.poolIds) {
+            auto poolIds = poolInfo.poolIds;
+            if (!m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+                poolIds.clear();
+                // we need to fake pool ids
+                for (auto it : poolInfo.allocedSetsToBoxed) {
+                    auto boxedSet = it.second;
+                    poolIds.push_back((uint64_t)boxedSet);
+                }
+                sort(poolIds.begin(), poolIds.end());
+            }
+            int dcount = poolIds.size();
+            GFXSTREAM_DEBUG("snapshot save: %d descriptor pool for this pool", dcount);
+            for (uint64_t poolId : poolIds) {
                 BoxedHandleInfo* setHandleInfo = sBoxedHandleManager.get(poolId);
                 bool allocated = setHandleInfo->underlying != 0;
                 stream->putByte(allocated);
                 if (!allocated) {
+                    GFXSTREAM_DEBUG("snapshot save: skip 0x%llx descriptor set for this pool",
+                                    (unsigned long long)poolId);
                     continue;
                 }
+                GFXSTREAM_DEBUG("snapshot save: keep 0x%llx descriptor set for this pool",
+                                (unsigned long long)poolId);
 
                 const DescriptorSetInfo& descriptorSetInfo =
                     mDescriptorSetInfo[(VkDescriptorSet)setHandleInfo->underlying];
@@ -567,6 +721,13 @@ class VkDecoderGlobalState::Impl {
         }
         stream->putBe64(unsignaledFencesBoxed.size());
         stream->write(unsignaledFencesBoxed.data(), unsignaledFencesBoxed.size() * sizeof(VkFence));
+
+        // Events
+        saveEvents(stream);
+
+        // Semaphores
+        saveSemaphores(stream);
+
         mSnapshotState = SnapshotState::Normal;
         GFXSTREAM_DEBUG("VulkanSnapshots save (end)");
     }
@@ -721,6 +882,8 @@ class VkDecoderGlobalState::Impl {
                 sortedBoxedDescriptorPools.push_back(boxed);
             }
             sort(sortedBoxedDescriptorPools.begin(), sortedBoxedDescriptorPools.end());
+            const bool needToUnboxDescriptorSet =
+                !(m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled);
             for (const auto& boxedDescriptorPool : sortedBoxedDescriptorPools) {
                 auto unboxedDescriptorPool = unbox_VkDescriptorPool(boxedDescriptorPool);
                 const DescriptorPoolInfo& poolInfo = mDescriptorPoolInfo[unboxedDescriptorPool];
@@ -730,17 +893,28 @@ class VkDecoderGlobalState::Impl {
                 std::vector<VkWriteDescriptorSet> writeDescriptorSets;
                 std::vector<uint32_t> writeStartingIndices;
 
+                auto allpoolIds = poolInfo.poolIds;
+                if (!m_vkEmulation->getFeatures().VulkanBatchedDescriptorSetUpdate.enabled) {
+                    allpoolIds.clear();
+                    for (auto it : poolInfo.allocedSetsToBoxed) {
+                        auto boxedSet = it.second;
+                        allpoolIds.push_back((uint64_t)boxedSet);
+                    }
+                    sort(allpoolIds.begin(), allpoolIds.end());
+                }
                 // Temporary structures for the pointers in VkWriteDescriptorSet.
                 // Use unique_ptr so that the pointers don't change when vector resizes.
                 std::vector<std::unique_ptr<VkDescriptorImageInfo>> tmpImageInfos;
                 std::vector<std::unique_ptr<VkDescriptorBufferInfo>> tmpBufferInfos;
                 std::vector<std::unique_ptr<VkBufferView>> tmpBufferViews;
 
-                for (uint64_t poolId : poolInfo.poolIds) {
+                for (uint64_t poolId : allpoolIds) {
                     bool allocated = stream->getByte();
                     if (!allocated) {
                         continue;
                     }
+                    GFXSTREAM_DEBUG("snapshot load: 0x%llx descriptor set for this pool",
+                                    (unsigned long long)poolId);
                     poolIds.push_back(poolId);
                     writeStartingIndices.push_back(writeDescriptorSets.size());
                     VkDescriptorSetLayout boxedLayout = (VkDescriptorSetLayout)stream->getBe64();
@@ -802,16 +976,19 @@ class VkDecoderGlobalState::Impl {
                     }
                 }
                 std::vector<uint32_t> whichPool(poolIds.size(), 0);
-                std::vector<uint32_t> pendingAlloc(poolIds.size(), true);
+                // no need to allocate descriptors as this is not batched
+                // all the descriptors are already allocated
+                std::vector<uint32_t> pendingAlloc(poolIds.size(), false);
 
                 const auto& device = poolInfo.device;
                 const auto& deviceInfo = gfxstream::base::find(mDeviceInfo, device);
                 VulkanDispatch* dvk = dispatch_VkDevice(deviceInfo->boxed);
                 on_vkQueueCommitDescriptorSetUpdatesGOOGLELocked(
-                    &bumpPool, kInvalidSnapshotApiCallHandle, dvk, device, 1, &unboxedDescriptorPool,
-                    poolIds.size(), layouts.data(), poolIds.data(), whichPool.data(),
-                    pendingAlloc.data(), writeStartingIndices.data(), writeDescriptorSets.size(),
-                    writeDescriptorSets.data());
+                    &bumpPool, kInvalidSnapshotApiCallHandle, dvk, device, 1,
+                    &unboxedDescriptorPool, poolIds.size(), layouts.data(), poolIds.data(),
+                    whichPool.data(), pendingAlloc.data(), writeStartingIndices.data(),
+                    writeDescriptorSets.size(), writeDescriptorSets.data(),
+                    needToUnboxDescriptorSet);
             }
 
             // Fences
@@ -835,6 +1012,12 @@ class VkDecoderGlobalState::Impl {
                 get_gfxstream_vm_operations().set_snapshot_uses_vulkan();
             }
 #endif
+
+            // Events
+            loadEvents(stream);
+
+            // semaphores
+            loadSemaphores(stream);
 
             mSnapshotLoadBoxedInstance2ContextId.clear();
             mSnapshotState = SnapshotState::Normal;
@@ -1828,6 +2011,10 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
+#if defined(__ANDROID__)
+        updatedDeviceExtensions.push_back("VK_ANDROID_external_memory_android_hardware_buffer");
+#endif
+
         const auto r2features = m_vkEmulation->getRobustness2Features();
         const bool forceEnableRobustness =
             r2features &&
@@ -2056,6 +2243,14 @@ class VkDecoderGlobalState::Impl {
         // Use vkGetMemoryWin32HandleKHR
         deviceInfo.getMemoryHandleFunc = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
             vk->vkGetDeviceProcAddr(*pDevice, "vkGetMemoryWin32HandleKHR"));
+        if (!deviceInfo.getMemoryHandleFunc) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+#elif defined(__ANDROID__)
+        // Use vkGetMemoryAndroidHardwareBufferANDROID
+        deviceInfo.getMemoryHandleFunc =
+            reinterpret_cast<PFN_vkGetMemoryAndroidHardwareBufferANDROID>(
+                vk->vkGetDeviceProcAddr(*pDevice, "vkGetMemoryAndroidHardwareBufferANDROID"));
         if (!deviceInfo.getMemoryHandleFunc) {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -2427,6 +2622,7 @@ class VkDecoderGlobalState::Impl {
 
         // Should happen before destroying fences
         deviceInfo.deviceOpTracker->OnDestroyDevice();
+        deviceInfo.deviceOpTracker.reset();
 
         // Destroy pooled external fences
         auto deviceFences = deviceInfo.externalFencePool->popAll();
@@ -2526,6 +2722,14 @@ class VkDecoderGlobalState::Impl {
         return result;
     }
 
+    void unbindFromBufferLocked(MemoryInfo* memoryInfo, VkBuffer buffer) {
+        memoryInfo->bufferMemoryRanges.erase(buffer);
+    }
+
+    void bindToBufferLocked(MemoryInfo* memoryInfo, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size) {
+        memoryInfo->bufferMemoryRanges[buffer] = {offset, size};
+    }
+
     void destroyBufferWithExclusiveInfo(VkDevice device, VulkanDispatch* deviceDispatch,
                                         VkBuffer buffer, BufferInfo& bufferInfo,
                                         const VkAllocationCallbacks* pAllocator) {
@@ -2539,6 +2743,10 @@ class VkDecoderGlobalState::Impl {
         auto& bufferInfo = bufferInfoIt->second;
 
         destroyBufferWithExclusiveInfo(device, deviceDispatch, buffer, bufferInfo, pAllocator);
+        auto* memoryInfo = gfxstream::base::find(mMemoryInfo, bufferInfo.memory);
+        if (memoryInfo && m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled) {
+            unbindFromBufferLocked(memoryInfo, buffer);
+        }
 
         mBufferInfo.erase(buffer);
     }
@@ -2564,7 +2772,14 @@ class VkDecoderGlobalState::Impl {
         bufferInfo->memoryOffset = memoryOffset;
 
         auto* memoryInfo = gfxstream::base::find(mMemoryInfo, memory);
-        if (memoryInfo && memoryInfo->boundBuffer) {
+        if (!memoryInfo) {
+            GFXSTREAM_WARNING("Failed to find VkDeviceMemory:%p", memory);
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        if (m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled) {
+            bindToBufferLocked(memoryInfo, buffer, memoryOffset, bufferInfo->size);
+        }
+        if (memoryInfo->boundBuffer) {
             auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
             if (deviceInfo) {
                 deviceInfo->debugUtilsHelper.addDebugLabel(buffer, "Buffer:%d",
@@ -2665,6 +2880,47 @@ class VkDecoderGlobalState::Impl {
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
         if (!deviceInfo) {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+
+        //TODO(b/438924843) this is probably not optimal as it might slow down image creation a bit.
+        {
+            auto physicalDevice = deviceInfo->physicalDevice;
+            auto* physdevInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
+            if (!physdevInfo) {
+                GFXSTREAM_ERROR("vkCreateImage: Could not find physical device info.");
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
+            }
+
+            auto* instanceInfo = gfxstream::base::find(mInstanceInfo, physdevInfo->instance);
+            if (!instanceInfo) {
+                GFXSTREAM_ERROR("vkCreateImage: Could not find instance info.");
+                return VK_ERROR_OUT_OF_HOST_MEMORY;
+            }
+
+            auto ivk = dispatch_VkInstance(instanceInfo->boxed);
+            VkImageFormatProperties imageFormatProperties;
+            VkResult res = ivk->vkGetPhysicalDeviceImageFormatProperties(
+                physicalDevice, pCreateInfo->format, pCreateInfo->imageType, pCreateInfo->tiling,
+                pCreateInfo->usage, pCreateInfo->flags, &imageFormatProperties);
+
+            if (res != VK_SUCCESS) {
+                GFXSTREAM_WARNING(
+                    "vkCreateImage: vkGetPhysicalDeviceImageFormatProperties failed with %s",
+                    string_VkResult(res));
+                return res;
+            }
+
+            if (pCreateInfo->extent.width > imageFormatProperties.maxExtent.width ||
+                pCreateInfo->extent.height > imageFormatProperties.maxExtent.height ||
+                pCreateInfo->extent.depth > imageFormatProperties.maxExtent.depth) {
+                GFXSTREAM_WARNING(
+                    "vkCreateImage: requested image dimensions (%u x %u x %u) "
+                    "exceeds device limits (%u x %u x %u).",
+                    pCreateInfo->extent.width, pCreateInfo->extent.height,
+                    pCreateInfo->extent.depth, imageFormatProperties.maxExtent.width,
+                    imageFormatProperties.maxExtent.height, imageFormatProperties.maxExtent.depth);
+                return VK_ERROR_VALIDATION_FAILED_EXT;
+            }
         }
 
         const bool needDecompression = deviceInfo->needEmulatedDecompression(pCreateInfo->format);
@@ -3085,6 +3341,12 @@ class VkDecoderGlobalState::Impl {
         if (samplerInfo.emulatedborderSampler != VK_NULL_HANDLE) {
             deviceDispatch->vkDestroySampler(device, samplerInfo.emulatedborderSampler, nullptr);
         }
+    }
+
+    void destroyEventWithExclusiveInfo(VkDevice device, VulkanDispatch* deviceDispatch,
+                                       VkEvent event, EventInfo& eventInfo,
+                                       const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroyEvent(device, event, pAllocator);
     }
 
     void destroySamplerLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkSampler sampler,
@@ -3583,8 +3845,11 @@ class VkDecoderGlobalState::Impl {
             close(semaphoreInfo.externalHandle);
         }
 #endif
+        if (!deviceInfo.deviceOpTracker) {
+            GFXSTREAM_ERROR("%s called after device destroy", __func__);
+        }
 
-        if (semaphoreInfo.latestUse && !IsDone(*semaphoreInfo.latestUse)) {
+        if (deviceInfo.deviceOpTracker && semaphoreInfo.latestUse && !IsDone(*semaphoreInfo.latestUse)) {
             deviceInfo.deviceOpTracker->AddPendingGarbage(*semaphoreInfo.latestUse, semaphore);
             deviceInfo.deviceOpTracker->PollAndProcessGarbage();
         } else {
@@ -3805,7 +4070,11 @@ class VkDecoderGlobalState::Impl {
             return DestroyFenceStatus::kRecycled;
         }
 
-        if (fenceInfo.latestUse && !IsDone(*fenceInfo.latestUse)) {
+        if (!deviceInfo.deviceOpTracker) {
+            GFXSTREAM_ERROR("%s called after device destroy", __func__);
+        }
+
+        if (deviceInfo.deviceOpTracker && fenceInfo.latestUse && !IsDone(*fenceInfo.latestUse)) {
             deviceInfo.deviceOpTracker->AddPendingGarbage(*fenceInfo.latestUse, fence);
             deviceInfo.deviceOpTracker->PollAndProcessGarbage();
         } else {
@@ -5537,7 +5806,13 @@ class VkDecoderGlobalState::Impl {
             nullptr,
         };
 #endif
-
+#if defined(__ANDROID__)
+        VkImportAndroidHardwareBufferInfoANDROID importInfo = {
+            .sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+            .pNext = nullptr,
+            .buffer = nullptr,
+        };
+#endif
         VkImportMemoryFdInfoKHR importFdInfo{
             VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
             0,
@@ -5576,9 +5851,9 @@ class VkDecoderGlobalState::Impl {
                 bool opaqueFd = true;
 
 #if defined(__APPLE__)
-                // Use metal object extension on MoltenVK mode for color buffer import,
-                // non-moltenVK path on MacOS will use FD handles
-                if (m_vkEmulation->supportsMoltenVk()) {
+                // Use metal object extension on host-vulkan mode for color buffer import,
+                // other paths on MacOS will use FD handles
+                if (m_vkEmulation->supportsExternalMemoryMetal()) {
                     if (dedicatedAllocInfoPtr == nullptr || localDedicatedAllocInfo.image == VK_NULL_HANDLE) {
                         // TODO(b/351765838): This should not happen, but somehow the guest
                         // is not providing us the necessary information for video rendering.
@@ -5650,6 +5925,10 @@ class VkDecoderGlobalState::Impl {
                             dupHandleInfo->streamHandleType);
                         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                     }
+#elif defined(__ANDROID__)
+                    importInfo.buffer = static_cast<AHardwareBuffer*>(
+                        reinterpret_cast<void*>(dupHandleInfo->handle));
+                    vk_append_struct(&structChainIter, &importInfo);
 #else
                     importFdInfo.fd = dupHandleInfo->getFd();
                     vk_append_struct(&structChainIter, &importFdInfo);
@@ -5670,7 +5949,7 @@ class VkDecoderGlobalState::Impl {
 
             bool opaqueFd = true;
 #ifdef __APPLE__
-            if (m_vkEmulation->supportsMoltenVk()) {
+            if (m_vkEmulation->supportsExternalMemoryMetal()) {
                 MTLResource_id bufferMetalMemoryHandle =
                     m_vkEmulation->getBufferMetalMemoryHandle(importBufferInfoPtr->buffer);
 
@@ -5730,7 +6009,7 @@ class VkDecoderGlobalState::Impl {
                         dupHandleInfo->streamHandleType);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
-#else
+#elif !defined(__ANDROID__)
                 importFdInfo.fd = dupHandleInfo->getFd();
                 vk_append_struct(&structChainIter, &importFdInfo);
 #endif
@@ -5785,49 +6064,73 @@ class VkDecoderGlobalState::Impl {
             vk_append_struct(&structChainIter, &localDedicatedAllocInfo);
         }
 
+        // Host visible memory often needs special handling by gfxstream and the virtual machine
+        // manager (VMM):
+        //
+        //  * When the external blob feature is not enabled,  the underlying VkDeviceMemory needs
+        //    to be shared with the VMM via `stream_renderer_resource_map()`.
+        //  * When the external blob feature is enabled, the memory needs to need external and
+        //    shared to the VMM as an OS-specific handle (`stream_renderer_export_blob`).
+        //  * there is also a case where the VMM shares an OS-specific handle with gfxstream,
+        //    (`STREAM_BLOB_MEM_GUEST`), though this is experimental only.
+        //
+        // We do not want to share all host visible memory if it is associated with a
+        // Colorbuffer/Buffer.  The exact desired semantics various by OS-type:
+        //  * For Android guests, mapping ColorBuffers/Buffers is handled by guest minigbm
+        //    (server-allocated) and no zero-copy logic is needed here.
+        //  * For Linux guests, host-visible Colorbuffers/Buffers are client allocated and in
+        //    theory need to be shared with the VMM here.  But in practice window system
+        //    buffers are not mapped by the guest, so no actual issues have been observed.
+        //  * For complete correctness, we may need "getGuestOsLogic" logic somewhere in
+        //    the future.
         const bool hostVisible = memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-
-        if (createBlobInfoPtr && createBlobInfoPtr->blobMem == STREAM_BLOB_MEM_GUEST &&
-            (createBlobInfoPtr->blobFlags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
-            DescriptorType rawDescriptor;
-            auto descriptorInfoOpt = ExternalObjectManager::get()->removeBlobDescriptorInfo(
-                virtioGpuContextId, createBlobInfoPtr->blobId);
-            if (descriptorInfoOpt) {
-                auto rawDescriptorOpt = (*descriptorInfoOpt).descriptorInfo.descriptor.release();
-                if (rawDescriptorOpt) {
-                    rawDescriptor = *rawDescriptorOpt;
-                } else {
-                    GFXSTREAM_ERROR("Failed vkAllocateMemory: missing raw descriptor.");
-                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-                }
-            } else {
-                GFXSTREAM_ERROR("Failed vkAllocateMemory: missing descriptor info.");
-                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-            }
-
-#if defined(_WIN32)
-            importWin32HandleInfo.handle = rawDescriptor;
-            vk_append_struct(&structChainIter, &importWin32HandleInfo);
-#else
-            importFdInfo.fd = rawDescriptor;
-            if (m_vkEmulation->supportsDmaBuf() && deviceHasDmabufExt) {
-                importFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-            }
-            vk_append_struct(&structChainIter, &importFdInfo);
-#endif
-        }
-
-        const bool isImport = importCbInfoPtr || importBufferInfoPtr;
-        const bool isExport = !isImport;
-
-        std::optional<VkImportMemoryHostPointerInfoEXT> importHostInfo;
-        std::optional<VkExportMemoryAllocateInfo> exportAllocateInfo;
+        bool importEmulatedExternalMemory = importCbInfoPtr || importBufferInfoPtr;
+        const bool emulateHostVisible = hostVisible && !importEmulatedExternalMemory;
 
         std::optional<SharedMemory> sharedMemory = std::nullopt;
+        std::optional<VkImportMemoryHostPointerInfoEXT> importHostInfo;
+        std::optional<VkExportMemoryAllocateInfo> exportAllocateInfo;
         std::shared_ptr<PrivateMemory> privateMemory = {};
 
-        if (isExport && hostVisible) {
-            if (m_vkEmulation->getFeatures().SystemBlob.enabled) {
+        if (emulateHostVisible) {
+            if (createBlobInfoPtr && createBlobInfoPtr->blobMem == STREAM_BLOB_MEM_GUEST &&
+                (createBlobInfoPtr->blobFlags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
+#if defined(__ANDROID__)
+                // Android host does not use dmabuf
+                (void)virtioGpuContextId; // suppress warning
+#elif defined(__linux__)
+                DescriptorType rawDescriptor;
+                auto descriptorInfoOpt = ExternalObjectManager::get()->removeBlobDescriptorInfo(
+                    virtioGpuContextId, createBlobInfoPtr->blobId);
+                if (descriptorInfoOpt) {
+                    auto rawDescriptorOpt =
+                        (*descriptorInfoOpt).descriptorInfo.descriptor.release();
+                    if (rawDescriptorOpt) {
+                        rawDescriptor = *rawDescriptorOpt;
+                    } else {
+                        GFXSTREAM_ERROR("Failed vkAllocateMemory: missing raw descriptor.");
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
+                } else {
+                    GFXSTREAM_ERROR("Failed vkAllocateMemory: missing descriptor info.");
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
+
+                if (!m_vkEmulation->supportsDmaBuf() || !deviceHasDmabufExt) {
+                    GFXSTREAM_ERROR("dmabuf not supported");
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                }
+
+                importFdInfo.fd = rawDescriptor;
+                importFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                vk_append_struct(&structChainIter, &importFdInfo);
+#else
+                GFXSTREAM_ERROR("Guest Handle flow should not work here");
+                return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+#endif
+            } else if (m_vkEmulation->getFeatures().SystemBlob.enabled ||
+                       m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled) {
                 // Ensure size is page-aligned.
                 VkDeviceSize alignedSize = ALIGN(localAllocInfo.allocationSize, kPageSizeforBlob);
                 if (alignedSize != localAllocInfo.allocationSize) {
@@ -5836,37 +6139,75 @@ class VkDecoderGlobalState::Impl {
                                     static_cast<unsigned long long>(alignedSize));
                 }
                 localAllocInfo.allocationSize = alignedSize;
+                auto memory = SharedMemory("shared-memory-vk-" + std::to_string(sUniqueShmemId++),
+                                           localAllocInfo.allocationSize);
 
-                static std::atomic<uint64_t> uniqueShmemId = 0;
-                sharedMemory = SharedMemory("shared-memory-vk-" + std::to_string(uniqueShmemId++),
-                                            localAllocInfo.allocationSize);
-                int ret = sharedMemory->create(0600);
-                if (ret) {
-                    GFXSTREAM_ERROR("Failed to create system-blob host-visible memory, error: %d",
-                                    ret);
-                    return VK_ERROR_OUT_OF_HOST_MEMORY;
+                if (m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled) {
+                    // 0755 = user read write
+                    int ret = memory.createNoMapping(0755);
+                    if (ret) {
+                        GFXSTREAM_ERROR("Failed to create shared memory, error: %d", ret);
+                        return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+
+                    auto creator = m_vkEmulation->getUdmabufCreator();
+                    if (!creator) {
+                        GFXSTREAM_ERROR("Failed to get OS handle manager");
+                        return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+
+                    auto descriptor = creator->handleFromSharedMemory(memory);
+                    if (!descriptor.has_value()) {
+                        GFXSTREAM_ERROR("Failed to create handle from shared memory");
+                        return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+
+                    // Import operation takes ownership of descriptor
+#if defined(__linux__)
+                    if (!m_vkEmulation->supportsDmaBuf() || !deviceHasDmabufExt) {
+                        GFXSTREAM_ERROR("dmabuf not supported");
+                        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
+
+                    importFdInfo.fd = descriptor.value();
+                    importFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                    vk_append_struct(&structChainIter, &importFdInfo);
+#else
+                    GFXSTREAM_ERROR("Import from shared memory should not work here");
+                    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+#endif
+                } else if (m_vkEmulation->getFeatures().SystemBlob.enabled) {
+                    int ret = memory.create(0600);
+                    if (ret) {
+                        GFXSTREAM_ERROR(
+                            "Failed to create system-blob host-visible memory, error: %d", ret);
+                        return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+                    mappedPtr = memory.get();
+                    int mappedPtrAlignment =
+                        reinterpret_cast<uintptr_t>(mappedPtr) % kPageSizeforBlob;
+                    if (mappedPtrAlignment != 0) {
+                        GFXSTREAM_ERROR(
+                            "Warning: Mapped shared memory pointer is not aligned to page size, "
+                            "alignment "
+                            "is: %d",
+                            mappedPtrAlignment);
+                    }
+                    importHostInfo = {
+                        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+                        .pNext = NULL,
+                        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                        .pHostPointer = mappedPtr,
+                    };
+                    vk_append_struct(&structChainIter, &*importHostInfo);
                 }
-                mappedPtr = sharedMemory->get();
-                int mappedPtrAlignment = reinterpret_cast<uintptr_t>(mappedPtr) % kPageSizeforBlob;
-                if (mappedPtrAlignment != 0) {
-                    GFXSTREAM_ERROR(
-                        "Warning: Mapped shared memory pointer is not aligned to page size, "
-                        "alignment "
-                        "is: %d",
-                        mappedPtrAlignment);
-                }
-                importHostInfo = {
-                    .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
-                    .pNext = NULL,
-                    .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-                    .pHostPointer = mappedPtr,
-                };
-                vk_append_struct(&structChainIter, &*importHostInfo);
+
+                sharedMemory = std::make_optional<SharedMemory>(std::move(memory));
             } else if (m_vkEmulation->getFeatures().ExternalBlob.enabled) {
                 VkExternalMemoryHandleTypeFlags handleTypes;
 
 #if defined(__APPLE__)
-                if (m_vkEmulation->supportsMoltenVk()) {
+                if (m_vkEmulation->supportsExternalMemoryMetal()) {
                     // Using a different handle type when in MoltenVK mode
                     handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
                 } else {
@@ -6018,7 +6359,6 @@ class VkDecoderGlobalState::Impl {
             // Always assign the shared memory into memoryInfo. If it was used, then it will have
             // ownership transferred.
             memoryInfo.sharedMemory = std::exchange(sharedMemory, std::nullopt);
-
             memoryInfo.privateMemory = privateMemory;
         }
 
@@ -6250,6 +6590,14 @@ class VkDecoderGlobalState::Impl {
             auto semaphoreInfo = gfxstream::base::find(mSemaphoreInfo, semaphore);
             if (semaphoreInfo != nullptr) {
                 semaphoreInfo->latestUse = aniCompletedWaitable;
+		// From https://source.android.com/docs/core/graphics/implement-vulkan#acquire_image
+		//
+		//    vkAcquireImageANDROID() is called during vkAcquireNextImageKHR to import a
+		//    native fence into the VkSemaphore and VkFence objects ...
+		//
+		//    This call puts the VkSemaphore and VkFence into the same pending state as if
+		// signaled by vkQueueSubmit ...
+                semaphoreInfo->onQueueSubmissionSignal();
             }
         }
         if (fence != VK_NULL_HANDLE) {
@@ -6301,9 +6649,30 @@ class VkDecoderGlobalState::Impl {
                                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         }
 
+        if (snapshotsEnabled()) {
+            for (uint32_t j = 0; j < waitSemaphoreCount; j++) {
+                auto unboxed_semaphore = pWaitSemaphores[j];
+                auto semaphoreInfoIt = mSemaphoreInfo.find(unboxed_semaphore);
+                if (semaphoreInfoIt == mSemaphoreInfo.end()) {
+                    GFXSTREAM_ERROR("Failed to find VkSemaphore:%p", unboxed_semaphore);
+                    return VK_ERROR_VALIDATION_FAILED_EXT;
+                }
+                auto& semaphoreInfo = semaphoreInfoIt->second;
+                if (semaphoreInfo.isTimelineSemaphore) {
+                    // timeline semaphore is not handled yet
+                    continue;
+                }
+                semaphoreInfo.onQueueSubmissionWait();
+            }
+        }
         return anbInfo->on_vkQueueSignalReleaseImageANDROID(
             m_vkEmulation, vk, queueInfo->queueFamilyIndex, queue, queueInfo->queueMutex.get(),
             waitSemaphoreCount, pWaitSemaphores, pNativeFenceFd);
+    }
+
+    void on_vkTraceAsyncGOOGLE(gfxstream::base::BumpPool*, VkSnapshotApiCallHandle, uint64_t id) {
+        GFXSTREAM_TRACE_EVENT_INSTANT(GFXSTREAM_TRACE_DECODER_CATEGORY, "vkTraceAsyncGOOGLE",
+                                      GFXSTREAM_TRACE_FLOW_GLOBAL(id), "flow id", id);
     }
 
     VkResult on_vkMapMemoryIntoAddressSpaceGOOGLE(gfxstream::base::BumpPool* pool,
@@ -6358,7 +6727,9 @@ class VkDecoderGlobalState::Impl {
 
         hostBlobId = (info->blobId && !hostBlobId) ? info->blobId : hostBlobId;
 
-        if (m_vkEmulation->getFeatures().SystemBlob.enabled && info->sharedMemory.has_value()) {
+        if ((m_vkEmulation->getFeatures().SystemBlob.enabled ||
+             m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled) &&
+            info->sharedMemory.has_value()) {
             // We transfer ownership of the shared memory handle to the descriptor info.
             // The memory itself is destroyed only when all processes unmap / release their
             // handles.
@@ -6367,8 +6738,8 @@ class VkDecoderGlobalState::Impl {
                 STREAM_HANDLE_TYPE_MEM_SHM, info->caching, std::nullopt);
         } else if (m_vkEmulation->getFeatures().ExternalBlob.enabled) {
 #ifdef __APPLE__
-            if (m_vkEmulation->supportsMoltenVk()) {
-                GFXSTREAM_FATAL("ExternalBlob feature is not supported with MoltenVK");
+            if (m_vkEmulation->supportsExternalMemoryMetal()) {
+                GFXSTREAM_FATAL("ExternalBlob feature is not supported with external memory metal");
             }
 #endif
 
@@ -6399,8 +6770,13 @@ class VkDecoderGlobalState::Impl {
                 return VK_ERROR_OUT_OF_HOST_MEMORY;
             }
             auto& exportedMemory = *exportedMemoryOpt;
+#ifdef __ANDROID__
+            auto& descriptor = exportedMemory.handle;
+#else
+            auto& descriptor = exportedMemory.descriptor;
+#endif
             ExternalObjectManager::get()->addBlobDescriptorInfo(
-                virtioGpuContextId, hostBlobId, std::move(exportedMemory.descriptor),
+                virtioGpuContextId, hostBlobId, std::move(descriptor),
                 exportedMemory.streamHandleType, info->caching,
                 std::optional<VulkanInfo>(vulkanInfo));
         } else if (!info->needUnmap) {
@@ -6885,6 +7261,37 @@ class VkDecoderGlobalState::Impl {
             m_vkEmulation->getCallbacks().invalidateColorBuffer(cb);
         }
 
+        if (m_vkEmulation->getFeatures().VulkanDisableCoherentMemoryAndEmulate.enabled) {
+            std::lock_guard<std::mutex> lock(mMutex);
+            std::vector<VkMappedMemoryRange> memoryRangesToFlush;
+            for (auto& it: mMemoryInfo) {
+                auto pMemory = it.first;
+                auto& mappedData = it.second;
+                if (mappedData.device != device) {
+                    continue;
+                }
+                if (mappedData.bufferMemoryRanges.empty()) {
+                    continue;
+                }
+                // TODO(b/424729656): this logic should run only for emulated memory
+                for (const auto& pair : mappedData.bufferMemoryRanges) {
+                    memoryRangesToFlush.push_back({
+                        .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+                        .pNext = nullptr,
+                        .memory = pMemory,
+                        .offset = pair.second.offset,
+                        .size = pair.second.size,
+                    });
+                }
+            }
+
+            if (!memoryRangesToFlush.empty()) {
+                // TODO(b/424729656): Invalidate might be necessary around a fence.
+                vk->vkFlushMappedMemoryRanges(device, static_cast<uint32_t>(memoryRangesToFlush.size()),
+                                              memoryRangesToFlush.data());
+            }
+        }
+
         VkFence usedFence = fence;
         DeviceOpBuilder builder(*deviceOpTracker);
         if (VK_NULL_HANDLE == usedFence) {
@@ -7035,6 +7442,48 @@ class VkDecoderGlobalState::Impl {
         }
         deviceOpTracker->PollAndProcessGarbage();
 
+        if (snapshotsEnabled()) {
+            for (uint32_t i = 0; i < submitCount; ++i) {
+                const uint32_t cmdCount = getCommandBufferCount(pSubmits[i]);
+                for (uint32_t j = 0; j < cmdCount; ++j) {
+                    auto commandBuffer = getCommandBuffer(pSubmits[i], i);
+                    processEventsForSubmittedCommandBuffer(queue, commandBuffer);
+                }
+            }
+
+            std::lock_guard<std::mutex> lock(mMutex);
+            for (uint32_t i = 0; i < submitCount; i++) {
+                const auto& s = pSubmits[i];
+                for (uint32_t j = 0; j < getWaitSemaphoreCount(s); j++) {
+                    auto unboxed_semaphore = getWaitSemaphore(s, j);
+                    auto semaphoreInfoIt = mSemaphoreInfo.find(unboxed_semaphore);
+                    if (semaphoreInfoIt == mSemaphoreInfo.end()) {
+                        GFXSTREAM_ERROR("Failed to find VkSemaphore:%p", unboxed_semaphore);
+                        return VK_ERROR_VALIDATION_FAILED_EXT;
+                    }
+                    auto& semaphoreInfo = semaphoreInfoIt->second;
+                    if (semaphoreInfo.isTimelineSemaphore) {
+                        // timeline semaphore is not handled yet
+                        continue;
+                    }
+                    semaphoreInfo.onQueueSubmissionWait();
+                }
+                for (uint32_t j = 0; j < getSignalSemaphoreCount(s); j++) {
+                    auto unboxed_semaphore = getSignalSemaphore(s, j);
+                    auto semaphoreInfoIt = mSemaphoreInfo.find(unboxed_semaphore);
+                    if (semaphoreInfoIt == mSemaphoreInfo.end()) {
+                        GFXSTREAM_ERROR("Failed to find VkSemaphore:%p", unboxed_semaphore);
+                        return VK_ERROR_VALIDATION_FAILED_EXT;
+                    }
+                    auto& semaphoreInfo = semaphoreInfoIt->second;
+                    if (semaphoreInfo.isTimelineSemaphore) {
+                        // timeline semaphore is not handled yet
+                        continue;
+                    }
+                    semaphoreInfo.onQueueSubmissionSignal();
+                }
+            }
+        }
         return VK_SUCCESS;
     }
 
@@ -7487,6 +7936,51 @@ class VkDecoderGlobalState::Impl {
         on_vkResetCommandBuffer(pool, apiCallHandle, boxed_commandBuffer, flags);
     }
 
+    void on_vkCmdSetEvent(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                          VkCommandBuffer boxed_commandBuffer, VkEvent event,
+                          VkPipelineStageFlags stageMask) {
+        auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
+        auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
+        vk->vkCmdSetEvent(commandBuffer, event, stageMask);
+        if (snapshotsEnabled()) {
+            std::lock_guard<std::mutex> lock(mMutex);
+            auto* cmdBufferInfo = gfxstream::base::find(mCommandBufferInfo, commandBuffer);
+            if (cmdBufferInfo == nullptr) {
+                GFXSTREAM_ERROR("Failed to find VkCommandBuffer:%p", commandBuffer);
+                return;
+            }
+            auto* eventInfo = gfxstream::base::find(mEventInfo, event);
+            if (eventInfo == nullptr) {
+                GFXSTREAM_ERROR("Failed to find VkEvent:%p", event);
+                return;
+            }
+            cmdBufferInfo->eventsSet.insert(event);
+            eventInfo->flags = stageMask;
+        }
+    }
+
+    void on_vkCmdResetEvent(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                            VkCommandBuffer boxed_commandBuffer, VkEvent event,
+                            VkPipelineStageFlags stageMask) {
+        auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
+        auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
+        vk->vkCmdResetEvent(commandBuffer, event, stageMask);
+        if (snapshotsEnabled()) {
+            std::lock_guard<std::mutex> lock(mMutex);
+            auto* cmdBufferInfo = gfxstream::base::find(mCommandBufferInfo, commandBuffer);
+            if (cmdBufferInfo == nullptr) {
+                GFXSTREAM_ERROR("Failed to find VkCommandBuffer:%p", commandBuffer);
+                return;
+            }
+            auto* eventInfo = gfxstream::base::find(mEventInfo, event);
+            if (eventInfo == nullptr) {
+                GFXSTREAM_ERROR("Failed to find VkEvent:%p", event);
+                return;
+            }
+            cmdBufferInfo->eventsReset.insert(event);
+        }
+    }
+
     void on_vkCmdBindPipeline(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
                               VkCommandBuffer boxed_commandBuffer,
                               VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline) {
@@ -7708,6 +8202,86 @@ class VkDecoderGlobalState::Impl {
                                       dstOffset, stride, flags);
     }
 
+    VkResult on_vkSetEvent(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                           VkDevice boxed_device, VkEvent event) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+        VkResult result = deviceDispatch->vkSetEvent(device, event);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            auto eventInfoIt = mEventInfo.find(event);
+            if (eventInfoIt != mEventInfo.end()) {
+                auto& eventInfo = eventInfoIt->second;
+                eventInfo.isSignaled = true;
+                eventInfo.isFromHost = true;
+            }
+        }
+        return result;
+    }
+
+    VkResult on_vkResetEvent(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                             VkDevice boxed_device, VkEvent event) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+        VkResult result = deviceDispatch->vkResetEvent(device, event);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            auto eventInfoIt = mEventInfo.find(event);
+            if (eventInfoIt != mEventInfo.end()) {
+                auto& eventInfo = eventInfoIt->second;
+                eventInfo.isSignaled = false;
+                eventInfo.isFromHost = false;
+                eventInfo.boxed_queue = VK_NULL_HANDLE;
+            }
+        }
+        return result;
+    }
+
+    VkResult on_vkCreateEvent(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                              VkDevice boxed_device, const VkEventCreateInfo* pCreateInfo,
+                              const VkAllocationCallbacks* pAllocator, VkEvent* pEvent) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+        VkResult result = deviceDispatch->vkCreateEvent(device, pCreateInfo, pAllocator, pEvent);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+        std::lock_guard<std::mutex> lock(mMutex);
+        VALIDATE_NEW_HANDLE_INFO_ENTRY(mEventInfo, *pEvent);
+        auto& eventInfo = mEventInfo[*pEvent];
+        eventInfo.device = device;
+        *pEvent = new_boxed_non_dispatchable_VkEvent(*pEvent);
+        eventInfo.boxed = *pEvent;
+        return result;
+    }
+
+    void on_vkDestroyEvent(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
+                           VkDevice boxed_device, VkEvent event,
+                           const VkAllocationCallbacks* pAllocator) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        std::lock_guard<std::mutex> lock(mMutex);
+        destroyEventLocked(device, deviceDispatch, event, pAllocator);
+    }
+
+    void destroyEventLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkEvent event,
+                            const VkAllocationCallbacks* pAllocator) REQUIRES(mMutex) {
+        auto eventInfoIt = mEventInfo.find(event);
+        if (eventInfoIt == mEventInfo.end()) return;
+        auto& eventInfo = eventInfoIt->second;
+
+        destroyEventWithExclusiveInfo(device, deviceDispatch, event, eventInfo, pAllocator);
+
+        mEventInfo.erase(event);
+    }
+
     VkResult on_vkCreateFramebuffer(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
                                     VkDevice boxed_device,
                                     const VkFramebufferCreateInfo* pCreateInfo,
@@ -7894,6 +8468,24 @@ class VkDecoderGlobalState::Impl {
         // with vkQueueSignalReleaseImageANDROID
         auto queue = unbox_VkQueue(boxed_queue);
         auto vk = dispatch_VkQueue(boxed_queue);
+
+        if (snapshotsEnabled()) {
+            std::lock_guard<std::mutex> lock(mMutex);
+            for (uint32_t j = 0; j < pPresentInfo->waitSemaphoreCount; j++) {
+                auto unboxed_semaphore = pPresentInfo->pWaitSemaphores[j];
+                auto semaphoreInfoIt = mSemaphoreInfo.find(unboxed_semaphore);
+                if (semaphoreInfoIt == mSemaphoreInfo.end()) {
+                    GFXSTREAM_ERROR("Failed to find VkSemaphore:%p", unboxed_semaphore);
+                    return VK_ERROR_VALIDATION_FAILED_EXT;
+                }
+                auto& semaphoreInfo = semaphoreInfoIt->second;
+                if (semaphoreInfo.isTimelineSemaphore) {
+                    // timeline semaphore is not handled yet
+                    continue;
+                }
+                semaphoreInfo.onQueueSubmissionWait();
+            }
+        }
 
         return vk->vkQueuePresentKHR(queue, pPresentInfo);
     }
@@ -8136,7 +8728,8 @@ class VkDecoderGlobalState::Impl {
         const uint64_t* pDescriptorSetPoolIds, const uint32_t* pDescriptorSetWhichPool,
         const uint32_t* pDescriptorSetPendingAllocation,
         const uint32_t* pDescriptorWriteStartingIndices, uint32_t pendingDescriptorWriteCount,
-        const VkWriteDescriptorSet* pPendingDescriptorWrites) REQUIRES(mMutex) {
+        const VkWriteDescriptorSet* pPendingDescriptorWrites, bool needToUnboxDescriptorSet = false)
+        REQUIRES(mMutex) {
         std::vector<VkDescriptorSet> setsToUpdate(descriptorSetCount, nullptr);
 
         bool didAlloc = false;
@@ -8153,7 +8746,7 @@ class VkDecoderGlobalState::Impl {
             if (didAllocThisTime) didAlloc = true;
         }
 
-        if (didAlloc) {
+        if (didAlloc || needToUnboxDescriptorSet) {
             std::vector<VkWriteDescriptorSet> writeDescriptorSetsForHostDriver(
                 pendingDescriptorWriteCount);
             memcpy(writeDescriptorSetsForHostDriver.data(), pPendingDescriptorWrites,
@@ -8402,7 +8995,8 @@ class VkDecoderGlobalState::Impl {
 
 #define GUEST_EXTERNAL_MEMORY_HANDLE_TYPES                                \
     (VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID | \
-     VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA)
+     VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA | \
+     VK_EXTERNAL_MEMORY_HANDLE_TYPE_SCREEN_BUFFER_BIT_QNX)
 
     // Transforms
     // If adding a new transform here, please check if it needs to be used in VkDecoderTestDispatch
@@ -8738,9 +9332,11 @@ class VkDecoderGlobalState::Impl {
         if (m_vkEmulation->supportsMoltenVk()) {
             hostAlwaysDeviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
             hostAlwaysDeviceExtensions.push_back(VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
+        }
+        if (m_vkEmulation->supportsExternalMemoryMetal()) {
             hostAlwaysDeviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME);
         } else {
-            // Non-MoltenVK path, use memory_fd
+            // Use memory_fd if external memory metal is not supported (software rendering path)
             hostAlwaysDeviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
         }
 #endif
@@ -8907,12 +9503,25 @@ class VkDecoderGlobalState::Impl {
         }
     }
 
-    std::optional<GenericDescriptorInfo> exportMemoryHandle(struct DeviceInfo* deviceInfo,
-                                                            VulkanDispatch* vk, VkDevice device,
-                                                            VkDeviceMemory memory) {
-        GenericDescriptorInfo ret;
+    std::optional<BlobDescriptorType> exportMemoryHandle(struct DeviceInfo* deviceInfo,
+                                                         VulkanDispatch* vk, VkDevice device,
+                                                         VkDeviceMemory memory) {
+        BlobDescriptorType ret;
 
-#if defined(__unix__)
+#if defined(__ANDROID__)
+        VkMemoryGetAndroidHardwareBufferInfoANDROID getAhbInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_GET_ANDROID_HARDWARE_BUFFER_INFO_ANDROID,
+            .pNext = nullptr,
+            .memory = memory,
+        };
+        ret.streamHandleType = STREAM_HANDLE_TYPE_MEM_AHB;
+        AHardwareBuffer* exportHandle;
+        if (deviceInfo->getMemoryHandleFunc(device, &getAhbInfo, &exportHandle) != VK_SUCCESS) {
+            return std::nullopt;
+        };
+
+        ret.handle = reinterpret_cast<ExternalHandleType>(exportHandle);
+#elif defined(__unix__)
         VkMemoryGetFdInfoKHR memoryGetFdInfo = {
             .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
             .pNext = nullptr,
@@ -9126,6 +9735,7 @@ class VkDecoderGlobalState::Impl {
         extractInfosWithDeviceInto(device, mQueueInfo, deviceObjects.queues);
         extractInfosWithDeviceInto(device, mRenderPassInfo, deviceObjects.renderPasses);
         extractInfosWithDeviceInto(device, mSamplerInfo, deviceObjects.samplers);
+        extractInfosWithDeviceInto(device, mEventInfo, deviceObjects.events);
         extractInfosWithDeviceInto(device, mSemaphoreInfo, deviceObjects.semaphores);
         extractInfosWithDeviceInto(device, mShaderModuleInfo, deviceObjects.shaderModules);
     }
@@ -9193,6 +9803,12 @@ class VkDecoderGlobalState::Impl {
                 destroySamplerWithExclusiveInfo(device, deviceDispatch, sampler, samplerInfo,
                                                 nullptr);
                 delete_VkSampler(samplerInfo.boxed);
+            }
+
+            LOG_CALLS_VERBOSE("%s: %zu events.", __func__, deviceObjects.events.size());
+            for (auto& [event, eventInfo] : deviceObjects.events) {
+                destroyEventWithExclusiveInfo(device, deviceDispatch, event, eventInfo, nullptr);
+                delete_VkEvent(eventInfo.boxed);
             }
 
             LOG_CALLS_VERBOSE("%s: %zu buffers.", __func__, deviceObjects.buffers.size());
@@ -9613,6 +10229,7 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkQueue, QueueInfo> mQueueInfo GUARDED_BY(mMutex);
     std::unordered_map<VkRenderPass, RenderPassInfo> mRenderPassInfo GUARDED_BY(mMutex);
     std::unordered_map<VkSampler, SamplerInfo> mSamplerInfo GUARDED_BY(mMutex);
+    std::unordered_map<VkEvent, EventInfo> mEventInfo GUARDED_BY(mMutex);
     std::unordered_map<VkSemaphore, SemaphoreInfo> mSemaphoreInfo GUARDED_BY(mMutex);
     std::unordered_map<VkShaderModule, ShaderModuleInfo> mShaderModuleInfo GUARDED_BY(mMutex);
 
@@ -10792,6 +11409,20 @@ VkResult VkDecoderGlobalState::on_vkCreateBufferWithRequirementsGOOGLE(
                                                           pAllocator, pBuffer, pMemoryRequirements);
 }
 
+void VkDecoderGlobalState::on_vkCmdSetEvent(gfxstream::base::BumpPool* pool,
+                                            VkSnapshotApiCallHandle apiCallHandle,
+                                            VkCommandBuffer commandBuffer, VkEvent event,
+                                            VkPipelineStageFlags stageMask) {
+    mImpl->on_vkCmdSetEvent(pool, apiCallHandle, commandBuffer, event, stageMask);
+}
+
+void VkDecoderGlobalState::on_vkCmdResetEvent(gfxstream::base::BumpPool* pool,
+                                              VkSnapshotApiCallHandle apiCallHandle,
+                                              VkCommandBuffer commandBuffer, VkEvent event,
+                                              VkPipelineStageFlags stageMask) {
+    mImpl->on_vkCmdResetEvent(pool, apiCallHandle, commandBuffer, event, stageMask);
+}
+
 void VkDecoderGlobalState::on_vkCmdBindPipeline(gfxstream::base::BumpPool* pool,
                                                 VkSnapshotApiCallHandle apiCallHandle,
                                                 VkCommandBuffer commandBuffer,
@@ -10881,11 +11512,40 @@ VkResult VkDecoderGlobalState::on_vkCreateFramebuffer(gfxstream::base::BumpPool*
                                          pFramebuffer);
 }
 
+VkResult VkDecoderGlobalState::on_vkSetEvent(gfxstream::base::BumpPool* pool,
+                                             VkSnapshotApiCallHandle apiCallHandle,
+                                             VkDevice boxed_device, VkEvent event) {
+    return mImpl->on_vkSetEvent(pool, apiCallHandle, boxed_device, event);
+}
+
+VkResult VkDecoderGlobalState::on_vkResetEvent(gfxstream::base::BumpPool* pool,
+                                               VkSnapshotApiCallHandle apiCallHandle,
+                                               VkDevice boxed_device, VkEvent event) {
+    return mImpl->on_vkResetEvent(pool, apiCallHandle, boxed_device, event);
+}
+
+VkResult VkDecoderGlobalState::on_vkCreateEvent(gfxstream::base::BumpPool* pool,
+                                                VkSnapshotApiCallHandle apiCallHandle,
+                                                VkDevice boxed_device,
+                                                const VkEventCreateInfo* pCreateInfo,
+                                                const VkAllocationCallbacks* pAllocator,
+                                                VkEvent* pEvent) {
+    return mImpl->on_vkCreateEvent(pool, apiCallHandle, boxed_device, pCreateInfo, pAllocator,
+                                   pEvent);
+}
+
 void VkDecoderGlobalState::on_vkDestroyFramebuffer(gfxstream::base::BumpPool* pool,
                                                    VkSnapshotApiCallHandle apiCallHandle,
                                                    VkDevice boxed_device, VkFramebuffer framebuffer,
                                                    const VkAllocationCallbacks* pAllocator) {
     mImpl->on_vkDestroyFramebuffer(pool, apiCallHandle, boxed_device, framebuffer, pAllocator);
+}
+
+void VkDecoderGlobalState::on_vkDestroyEvent(gfxstream::base::BumpPool* pool,
+                                             VkSnapshotApiCallHandle apiCallHandle,
+                                             VkDevice boxed_device, VkEvent event,
+                                             const VkAllocationCallbacks* pAllocator) {
+    mImpl->on_vkDestroyEvent(pool, apiCallHandle, boxed_device, event, pAllocator);
 }
 
 void VkDecoderGlobalState::on_vkQueueHostSyncGOOGLE(gfxstream::base::BumpPool* pool,
@@ -11009,6 +11669,11 @@ void VkDecoderGlobalState::on_vkQueueSignalReleaseImageANDROIDAsyncGOOGLE(
     int fenceFd;
     mImpl->on_vkQueueSignalReleaseImageANDROID(pool, apiCallHandle, queue, waitSemaphoreCount,
                                                pWaitSemaphores, image, &fenceFd);
+}
+
+void VkDecoderGlobalState::on_vkTraceAsyncGOOGLE(gfxstream::base::BumpPool* pool,
+                                                 VkSnapshotApiCallHandle apiCallHandle, uint64_t id) {
+    mImpl->on_vkTraceAsyncGOOGLE(pool, apiCallHandle, id);
 }
 
 VkResult VkDecoderGlobalState::on_vkCreateSamplerYcbcrConversion(

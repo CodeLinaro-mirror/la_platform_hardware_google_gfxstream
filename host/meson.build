@@ -151,6 +151,10 @@ gfxstream_backend_cpp_args = [
   '-DVK_GFXSTREAM_STRUCTURE_TYPE_EXT',
 ]
 
+if host_machine.system() == 'windows'
+  gfxstream_backend_cpp_args += '-DVK_USE_PLATFORM_WIN32_KHR'
+endif
+
 deps_gfxstream_backend = []
 
 link_args_gfxstream_backend = ''
@@ -159,7 +163,7 @@ if host_machine.system() == 'linux'
   deps_gfxstream_backend += [
     thread_dep,
   ]
-  link_args_gfxstream_backend = '-Wl,-lpthread,-lrt'
+  link_args_gfxstream_backend = '-Wl,-lpthread,-lrt,-ldl'
 endif
 
 if host_machine.system() == 'qnx'

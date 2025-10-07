@@ -16,7 +16,6 @@
 #include <functional>
 #include <memory>
 
-#include "gfxstream/common/logging.h"
 #include "gfxstream/host/Features.h"
 #include "render-utils/Renderer.h"
 #include "render-utils/address_space_operations.h"
@@ -96,7 +95,7 @@ public:
     // There might be only one renderer.
     virtual RendererPtr initRenderer(int width, int height,
                                      const gfxstream::host::FeatureSet& features,
-                                     bool useSubWindow, bool egl2egl) = 0;
+                                     bool useSubWindow) = 0;
 
     virtual OnLastColorBufferRef getOnLastColorBufferRef() = 0;
 };

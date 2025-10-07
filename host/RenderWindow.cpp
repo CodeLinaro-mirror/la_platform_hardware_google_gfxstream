@@ -83,7 +83,6 @@ struct RenderWindowMessage {
             int height;
             const gfxstream::host::FeatureSet* features;
             bool useSubWindow;
-            bool egl2egl;
         } init;
 
         // CMD_SET_POST_CALLBACK
@@ -149,8 +148,7 @@ struct RenderWindowMessage {
                 result = FrameBuffer::initialize(msg.init.width,
                                                  msg.init.height,
                                                  *msg.init.features,
-                                                 msg.init.useSubWindow,
-                                                 msg.init.egl2egl);
+                                                 msg.init.useSubWindow);
                 break;
 
             case CMD_FINALIZE:
@@ -422,7 +420,7 @@ private:
 }  // namespace
 
 RenderWindow::RenderWindow(int width, int height, const gfxstream::host::FeatureSet& features,
-                           bool use_thread, bool use_sub_window, bool egl2egl) {
+                           bool use_thread, bool use_sub_window) {
     if (use_thread) {
         mChannel = new RenderWindowChannel();
         mThread = new RenderWindowThread(mChannel);
@@ -446,7 +444,6 @@ RenderWindow::RenderWindow(int width, int height, const gfxstream::host::Feature
     msg.init.height = height;
     msg.init.features = &features;
     msg.init.useSubWindow = use_sub_window;
-    msg.init.egl2egl = egl2egl;
     mValid = processMessage(msg);
 }
 
@@ -494,15 +491,11 @@ bool RenderWindow::getHardwareStrings(const char** vendor,
         return false;
     }
 
-#if GFXSTREAM_ENABLE_HOST_GLES
-    fb->getGLStrings(vendor, renderer, version);
+    fb->getDeviceInfo(vendor, renderer, version);
     D("Exiting vendor=[%s] renderer=[%s] version=[%s]\n",
       *vendor, *renderer, *version);
 
     return true;
-#else
-    return false;
-#endif
 }
 
 void RenderWindow::setPostCallback(Renderer::OnPostCallback onPost, void* onPostContext,
@@ -608,7 +601,7 @@ void RenderWindow::setTranslation(float px, float py) {
     D("Exiting\n");
 }
 
-void RenderWindow::setScreenMask(int width, int height, const unsigned char* rgbaData) {
+void RenderWindow::setScreenMask(int width, int height, const uint8_t* rgbaData) {
     if (FrameBuffer* fb = FrameBuffer::getFB()) {
         fb->setScreenMask(width, height, rgbaData);
     }

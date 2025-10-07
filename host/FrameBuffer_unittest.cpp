@@ -20,6 +20,7 @@
 #include "FrameBuffer.h"
 #include "RenderThreadInfo.h"
 #include "gfxstream/files/PathUtils.h"
+#include "gfxstream/host/Features.h"
 #include "gfxstream/host/display_operations.h"
 #include "gfxstream/host/file_stream.h"
 #include "gfxstream/host/mem_stream.h"
@@ -40,6 +41,7 @@
 namespace gfxstream {
 namespace {
 
+using gfxstream::host::FeatureSet;
 using gfxstream::host::StdioStream;
 using gl::EGLDispatch;
 using gl::GLESApi_3_0;
@@ -61,14 +63,14 @@ class FrameBufferTest : public ::testing::Test {
         mWindow = createOrGetTestWindow(mXOffset, mYOffset, mWidth, mHeight);
         mUseSubWindow = mWindow != nullptr;
 
+        FeatureSet features = {};
+        features.EglOnEgl.enabled = !useHostGpu;
+
         if (mUseSubWindow) {
             ASSERT_NE(nullptr, mWindow->getFramebufferNativeWindow());
 
             EXPECT_TRUE(
-                FrameBuffer::initialize(
-                    mWidth, mHeight, {},
-                    mUseSubWindow,
-                    !useHostGpu /* egl2egl */));
+                FrameBuffer::initialize(mWidth, mHeight, features, mUseSubWindow));
             mFb = FrameBuffer::getFB();
             EXPECT_NE(nullptr, mFb);
 
@@ -81,10 +83,7 @@ class FrameBufferTest : public ::testing::Test {
             mWindow->messageLoop();
         } else {
             EXPECT_TRUE(
-                FrameBuffer::initialize(
-                    mWidth, mHeight, {},
-                    mUseSubWindow,
-                    !useHostGpu /* egl2egl */));
+                FrameBuffer::initialize(mWidth, mHeight, features, mUseSubWindow));
             mFb = FrameBuffer::getFB();
             ASSERT_NE(nullptr, mFb);
         }
@@ -790,6 +789,20 @@ TEST_F(FrameBufferTest, SetMultiDisplayPosition) {
     EXPECT_EQ(0, mFb->getDisplayPose(id, &x, &y, &width, &height));
     EXPECT_EQ(w, width);
     EXPECT_EQ(h, height);
+    EXPECT_EQ(0, mFb->destroyDisplay(id));
+}
+
+TEST_F(FrameBufferTest, SetMultiDisplayColorTransform) {
+    uint32_t id = FrameBuffer::s_invalidIdMultiDisplay;
+    mFb->createDisplay(&id);
+    EXPECT_NE((uint32_t)0, id);
+    const float colorTransform[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    EXPECT_EQ(0, mFb->setDisplayColorTransform(id, colorTransform));
+    float colorTransformReadback[16] = {};
+    EXPECT_EQ(0, mFb->getDisplayColorTransform(id, colorTransformReadback));
+    for (int i = 0; i < 16; i++) {
+        EXPECT_EQ(colorTransform[i], colorTransformReadback[i]);
+    }
     EXPECT_EQ(0, mFb->destroyDisplay(id));
 }
 

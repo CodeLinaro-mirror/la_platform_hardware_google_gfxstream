@@ -79,7 +79,7 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     // setPostCallback() instead to retrieve the content.
     // Returns true on success, false otherwise.
     static bool initialize(int width, int height, const gfxstream::host::FeatureSet& features,
-                           bool useSubWindow, bool egl2egl);
+                           bool useSubWindow);
 
     // Finalize the instance.
     static void finalize();
@@ -334,7 +334,7 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     float getPy() const;
     int getZrot() const;
 
-    void setScreenMask(int width, int height, const unsigned char* rgbaData);
+    void setScreenMask(int width, int height, const uint8_t* rgbaData);
 
     void registerVulkanInstance(uint64_t id, const char* appName) const;
     void unregisterVulkanInstance(uint64_t id) const;
@@ -384,6 +384,8 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
                        uint32_t* h);
     int setDisplayPose(uint32_t displayId, int32_t x, int32_t y, uint32_t w, uint32_t h,
                        uint32_t dpi = 0);
+    int getDisplayColorTransform(uint32_t displayId, float outColorTransform[16]);
+    int setDisplayColorTransform(uint32_t displayId, const float colorTransform[16]);
     struct DisplayInfo {
         uint32_t cb;
         int32_t pos_x;
@@ -469,11 +471,6 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     void getNumConfigs(int* outNumConfigs, int* outNumAttribs);
     EGLint getConfigs(uint32_t bufferSize, GLuint* buffer);
     EGLint chooseConfig(EGLint* attribs, EGLint* configs, EGLint configsSize);
-
-    // Retrieve the GL strings of the underlying EGL/GLES implementation.
-    // On return, |*vendor|, |*renderer| and |*version| will point to strings
-    // that are owned by the instance (and must not be freed by the caller).
-    void getGLStrings(const char** vendor, const char** renderer, const char** version) const;
 
     // Create a new EmulatedEglContext instance for this display instance.
     // |p_config| is the index of one of the configs returned by getConfigs().
@@ -601,6 +598,11 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     const void* getEglDispatch();
     const void* getGles2Dispatch();
 #endif  // GFXSTREAM_ENABLE_HOST_GLES
+
+    // Retrieve the vendor info strings for the GPU driver used.
+    // On return, |*vendor|, |*renderer| and |*version| will point to strings
+    // that are owned by the instance (and must not be freed by the caller).
+    void getDeviceInfo(const char** vendor, const char** renderer, const char** version) const;
 
     const gfxstream::host::FeatureSet& getFeatures() const;
 

@@ -37,6 +37,7 @@
 #include "gfxstream/host/RenderDoc.h"
 #include "gfxstream/host/external_object_manager.h"
 #include "gfxstream/host/vk_enums.h"
+#include "gfxstream/memory/UdmabufCreator.h"
 #include "goldfish_vk_private_defs.h"
 
 #if defined(_WIN32)
@@ -53,6 +54,8 @@ typedef int VK_EXT_SYNC_HANDLE;
 
 namespace gfxstream {
 namespace vk {
+
+using gfxstream::base::UdmabufCreator;
 
 struct VulkanDispatch;
 
@@ -112,6 +115,7 @@ class VkEmulation {
     bool supportsExternalFenceCapabilities() const;
     bool supportsSurfaces() const;
     bool supportsMoltenVk() const;
+    bool supportsExternalMemoryMetal() const;
 
     bool supportsGetPhysicalDeviceProperties2() const;
 
@@ -155,6 +159,8 @@ class VkEmulation {
     Compositor* getCompositor();
 
     DisplayVk* getDisplay();
+
+    UdmabufCreator* getUdmabufCreator();
 
     VkInstance getInstance();
 
@@ -571,8 +577,10 @@ class VkEmulation {
     bool mInstanceSupportsSurface = false;
 #if defined(__APPLE__)
     bool mInstanceSupportsMoltenVK = false;
+    bool mInstanceSupportsExternalMemoryMetal = false;
 #else
     static const bool mInstanceSupportsMoltenVK = false;
+    static const bool mInstanceSupportsExternalMemoryMetal = false;
 #endif
 
     PFN_vkGetPhysicalDeviceImageFormatProperties2KHR mGetImageFormatProperties2Func = nullptr;
@@ -667,6 +675,9 @@ class VkEmulation {
     // The implementation for Vulkan native swapchain. Only initialized in initVkEmulationFeatures
     // if useVulkanNativeSwapchain is set.
     std::unique_ptr<DisplayVk> mDisplayVk;
+
+    // UdmabufCreator
+    std::unique_ptr<UdmabufCreator> mUdmabufCreator;
 };
 
 }  // namespace vk

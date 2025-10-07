@@ -23,6 +23,7 @@
 #include <xf86drm.h>
 
 #include <atomic>
+#include <vector>
 
 #ifdef __ANDROID__
 #include <cutils/properties.h>
@@ -316,9 +317,9 @@ struct app_time_metric_t {
 
         // Log/reset once every second
         if(now - lastLogTime > 1000000000) {
-            float avgMs = ns2ms(totalAppTime) / numSamples;
-            float minMs = ns2ms(minAppTime);
-            float maxMs = ns2ms(maxAppTime);
+            //float avgMs = ns2ms(totalAppTime) / numSamples;
+            //float minMs = ns2ms(minAppTime);
+            //float maxMs = ns2ms(maxAppTime);
             totalAppTime = 0;
             minAppTime = 0;
             maxAppTime = 0;
@@ -424,8 +425,8 @@ struct egl_window_surface_t : public egl_surface_t {
 
     virtual ~egl_window_surface_t();
 
-    virtual void       setSwapInterval(int interval);
-    virtual EGLBoolean swapBuffers();
+    virtual void       setSwapInterval(int interval) override;
+    virtual EGLBoolean swapBuffers() override;
 
     virtual     void        setCollectingTimestamps(EGLint collect)
         override { collectingTimestamps = (collect == EGL_TRUE) ? true : false; }
@@ -797,8 +798,8 @@ struct egl_pbuffer_surface_t : public egl_surface_t {
 
     virtual ~egl_pbuffer_surface_t();
 
-    virtual void       setSwapInterval(int interval) { (void)interval; }
-    virtual EGLBoolean swapBuffers() { return EGL_TRUE; }
+    virtual void       setSwapInterval(int interval) override { (void)interval; }
+    virtual EGLBoolean swapBuffers() override { return EGL_TRUE; }
 
     uint32_t getRcColorBuffer() { return rcColorBuffer; }
 
@@ -1070,10 +1071,9 @@ static const char *getGLString(int glEnum)
 
 // ----------------------------------------------------------------------------
 
-// Note: C99 syntax was tried here but does not work for all compilers.
 static EGLClient_eglInterface s_eglIface = {
-    getThreadInfo: getEGLThreadInfo,
-    getGLString: getGLString,
+    getEGLThreadInfo,
+    getGLString,
 };
 
 #define DBG_FUNC DBG("%s\n", __FUNCTION__)
@@ -1176,10 +1176,13 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list, EGLConfig 
         attrib_list = backup_attribs;
     }
 
-    uint32_t* tempConfigs[config_size];
     DEFINE_AND_VALIDATE_HOST_CONNECTION(EGL_FALSE);
+
+    std::vector<uint32_t> tempConfigs;
+    tempConfigs.resize(config_size, 0);
+
     *num_config = rcEnc->rcChooseConfig(rcEnc, (EGLint*)attrib_list,
-            attribs_size * sizeof(EGLint), (uint32_t*)tempConfigs, config_size);
+            attribs_size * sizeof(EGLint), tempConfigs.data(), config_size);
 
     if (*num_config < 0) {
         EGLint err = -(*num_config);
@@ -1195,11 +1198,10 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list, EGLConfig 
     if (configs!=NULL) {
         EGLint i=0;
         for (i=0;i<(*num_config);i++) {
-            EGLConfig guestConfig = s_display.getConfigAtIndex(*((uint32_t*)tempConfigs+i));
+            EGLConfig guestConfig = s_display.getConfigAtIndex(tempConfigs[i]);
             configs[i] = guestConfig;
         }
     }
-
     return EGL_TRUE;
 }
 

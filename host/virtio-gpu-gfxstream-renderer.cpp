@@ -24,12 +24,13 @@ extern "C" {
 #include "FrameBuffer.h"
 #include "VirtioGpuFrontend.h"
 #include "gfxstream/Metrics.h"
-#include "gfxstream/system/System.h"
 #include "gfxstream/Strings.h"
+#include "gfxstream/common/logging.h"
 #include "gfxstream/host/Features.h"
 #include "gfxstream/host/Tracing.h"
 #include "gfxstream/host/address_space_graphics.h"
-#include "gfxstream/common/logging.h"
+#include "gfxstream/memory/UdmabufCreator.h"
+#include "gfxstream/system/System.h"
 #ifdef CONFIG_AEMU
 #include "host-common/opengles.h"
 #endif
@@ -55,10 +56,17 @@ static VirtioGpuFrontend* sFrontend() {
 std::optional<gfxstream::host::FeatureSet>
 ParseGfxstreamFeatures(const int rendererFlags,
                         const std::string& rendererFeatures) {
+    if (gfxstream::base::getEnvironmentVariable("ANDROID_GFXSTREAM_EGL") == "1") {
+        gfxstream::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
+        gfxstream::base::setEnvironmentVariable("ANDROID_EMUGL_VERBOSE", "1");
+    }
+    gfxstream::base::setEnvironmentVariable("ANDROID_EMU_HEADLESS", "1");
+
     gfxstream::host::FeatureSet features;
     GFXSTREAM_SET_FEATURE_ON_CONDITION(
-        &features, ExternalBlob,
-        rendererFlags & STREAM_RENDERER_FLAGS_USE_EXTERNAL_BLOB);
+        &features, EglOnEgl,
+        rendererFlags & STREAM_RENDERER_FLAGS_USE_EGL_BIT ||
+        gfxstream::base::getEnvironmentVariable("ANDROID_EGL_ON_EGL") == "1");
     GFXSTREAM_SET_FEATURE_ON_CONDITION(&features, VulkanExternalSync,
                                        rendererFlags & STREAM_RENDERER_FLAGS_VULKAN_EXTERNAL_SYNC);
     GFXSTREAM_SET_FEATURE_ON_CONDITION(
@@ -115,6 +123,14 @@ ParseGfxstreamFeatures(const int rendererFlags,
     GFXSTREAM_SET_FEATURE_ON_CONDITION(
         &features, VulkanSnapshots,
         gfxstream::base::getEnvironmentVariable("ANDROID_GFXSTREAM_CAPTURE_VK_SNAPSHOT") == "1");
+    // b:423003060
+    GFXSTREAM_SET_FEATURE_ON_CONDITION(
+        &features, VulkanAllocateHostVisibleAsUdmabuf,
+        gfxstream::base::IsAndroidKernel6_6() && gfxstream::base::HasUdmabufDevice());
+    // udmabuf requires ExternalBlob feature.
+    GFXSTREAM_SET_FEATURE_ON_CONDITION(&features, ExternalBlob,
+                                       rendererFlags & STREAM_RENDERER_FLAGS_USE_EXTERNAL_BLOB ||
+                                           features.VulkanAllocateHostVisibleAsUdmabuf.enabled);
 
     for (const std::string& rendererFeature : gfxstream::Split(rendererFeatures, ",")) {
         if (rendererFeature.empty()) continue;
@@ -226,25 +242,12 @@ RendererPtr InitRenderer(uint32_t displayWidth,
     GFXSTREAM_DEBUG("Initializing renderer with width:%u height:%u renderer-flags:0x%x",
                     displayWidth, displayHeight, rendererFlags);
 
-    if (gfxstream::base::getEnvironmentVariable("ANDROID_GFXSTREAM_EGL") == "1") {
-        gfxstream::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
-        gfxstream::base::setEnvironmentVariable("ANDROID_EMUGL_VERBOSE", "1");
-    }
-    gfxstream::base::setEnvironmentVariable("ANDROID_EMU_HEADLESS", "1");
-
-    const bool egl2eglByEnv = gfxstream::base::getEnvironmentVariable("ANDROID_EGL_ON_EGL") == "1";
-    const bool egl2eglByFlag = rendererFlags & STREAM_RENDERER_FLAGS_USE_EGL_BIT;
-    const bool enableEgl2egl = egl2eglByFlag || egl2eglByEnv;
-    if (enableEgl2egl) {
-        gfxstream::base::setEnvironmentVariable("ANDROID_EGL_ON_EGL", "1");
-    }
-
     gfxstream::vk::vkDispatch(false /* don't use test ICD */);
 
     static gfxstream::RenderLibPtr sRendererLibrary = gfxstream::initLibrary();
     MaybeConfigureRenderer(*sRendererLibrary);
 
-    RendererPtr renderer = sRendererLibrary->initRenderer(displayWidth, displayHeight, features, true, enableEgl2egl);
+    RendererPtr renderer = sRendererLibrary->initRenderer(displayWidth, displayHeight, features, true);
     if (!renderer) {
         GFXSTREAM_ERROR("Failed to initialize renderer.");
         return nullptr;
@@ -875,7 +878,7 @@ VG_EXPORT void stream_renderer_teardown() {
 }
 
 VG_EXPORT void gfxstream_backend_set_screen_mask(int width, int height,
-                                                 const unsigned char* rgbaData) {
+                                                 const uint8_t* rgbaData) {
     sFrontend()->setScreenMask(width, height, rgbaData);
 }
 
