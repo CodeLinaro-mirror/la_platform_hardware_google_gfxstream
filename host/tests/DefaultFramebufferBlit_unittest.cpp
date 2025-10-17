@@ -15,12 +15,13 @@
 
 #include <memory>
 
-#include "FrameBuffer.h"
+#include "frame_buffer.h"
 #include "OpenGLESDispatch/OpenGLDispatchLoader.h"
 #include "gfxstream/host/testing/GLTestUtils.h"
 #include "gfxstream/host/testing/SampleApplication.h"
 
 namespace gfxstream {
+namespace host {
 namespace {
 
 using gl::GLESApi;
@@ -273,4 +274,5 @@ INSTANTIATE_TEST_SUITE_P(DefaultFramebufferBlitTest,
                             ClearColorParam(GLESApi_3_0, true)));
 
 }  // namespace
+}  // namespace host
 }  // namespace gfxstream
