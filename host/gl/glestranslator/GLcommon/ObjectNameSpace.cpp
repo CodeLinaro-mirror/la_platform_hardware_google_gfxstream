@@ -332,7 +332,7 @@ void GlobalNameSpace::onSave(gfxstream::Stream* stream,
     int cleanTexs = 0;
     int dirtyTexs = 0;
 #endif // SNAPSHOT_PROFILE > 1
-    saveCollection(
+    gfxstream::host::saveCollection(
             stream, m_textureMap,
             [saver, &textureSaver
 #if SNAPSHOT_PROFILE > 1
@@ -360,8 +360,7 @@ void GlobalNameSpace::onSave(gfxstream::Stream* stream,
             });
     clearTextureMap();
 #if SNAPSHOT_PROFILE > 1
-    printf("Dirty texture saved %d, clean texture saved %d\n",
-            dirtyTexs, cleanTexs);
+    GFXSTREAM_INFO("Dirty texture saved %d, clean texture saved %d\n", dirtyTexs, cleanTexs);
 #endif // SNAPSHOT_PROFILE > 1
 }
 
@@ -374,7 +373,7 @@ void GlobalNameSpace::onLoad(gfxstream::Stream* stream,
         GFXSTREAM_FATAL("Texture file unsupported version or corrupted.\n");
         return;
     }
-    loadCollection(
+    gfxstream::host::loadCollection(
             stream, &m_textureMap,
             [this, creator, textureLoaderWPtr](gfxstream::Stream* stream) {
                 unsigned int globalName = stream->getBe32();

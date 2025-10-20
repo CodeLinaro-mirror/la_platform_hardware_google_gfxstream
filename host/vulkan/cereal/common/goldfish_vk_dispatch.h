@@ -35,17 +35,22 @@
 #include "goldfish_vk_private_defs.h"
 #include "vk_android_native_buffer_gfxstream.h"
 #include "vulkan_gfxstream.h"
+
 namespace gfxstream {
+namespace host {
 namespace vk {
 
 struct VulkanDispatch;
 
 }  // namespace vk
+}  // namespace host
 }  // namespace gfxstream
+
 using DlOpenFunc = void*(void);
 using DlSymFunc = void*(void*, const char*);
 
 namespace gfxstream {
+namespace host {
 namespace vk {
 
 void init_vulkan_dispatch_from_system_loader(DlOpenFunc dlOpenFunc, DlSymFunc dlSymFunc,
@@ -475,6 +480,9 @@ struct VulkanDispatch {
     PFN_vkCmdEndQueryIndexedEXT vkCmdEndQueryIndexedEXT;
     PFN_vkCmdDrawIndirectByteCountEXT vkCmdDrawIndirectByteCountEXT;
 #endif
+#ifdef VK_MVK_macos_surface
+    PFN_vkCreateMacOSSurfaceMVK vkCreateMacOSSurfaceMVK;
+#endif
 #ifdef VK_EXT_debug_utils
     PFN_vkSetDebugUtilsObjectNameEXT vkSetDebugUtilsObjectNameEXT;
     PFN_vkSetDebugUtilsObjectTagEXT vkSetDebugUtilsObjectTagEXT;
@@ -581,6 +589,7 @@ struct VulkanDispatch {
     PFN_vkUpdateDescriptorSetWithTemplateSized2GOOGLE vkUpdateDescriptorSetWithTemplateSized2GOOGLE;
     PFN_vkQueueSubmitAsync2GOOGLE vkQueueSubmitAsync2GOOGLE;
     PFN_vkGetSemaphoreGOOGLE vkGetSemaphoreGOOGLE;
+    PFN_vkTraceAsyncGOOGLE vkTraceAsyncGOOGLE;
 #endif
 #ifdef VK_QNX_external_memory_screen_buffer
     PFN_vkGetScreenBufferPropertiesQNX vkGetScreenBufferPropertiesQNX;
@@ -601,4 +610,5 @@ struct VulkanDispatch {
 };
 
 }  // namespace vk
+}  // namespace host
 }  // namespace gfxstream

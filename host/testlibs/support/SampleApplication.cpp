@@ -20,10 +20,10 @@
 
 #include <thread>
 
-#include "FrameBuffer.h"
+#include "host/frame_buffer.h"
 #include "OpenGLESDispatch/OpenGLDispatchLoader.h"
-#include "RenderThreadInfo.h"
-#include "gfxstream/host/Features.h"
+#include "host/render_thread_info.h"
+#include "gfxstream/host/features.h"
 #include "gfxstream/host/renderer_operations.h"
 #include "gfxstream/host/testing/OSWindow.h"
 #include "gfxstream/host/testing/ShaderUtils.h"
@@ -34,6 +34,7 @@
 #include "render-utils/render_api_platform_types.h"
 
 namespace gfxstream {
+namespace host {
 
 using gfxstream::base::AutoLock;
 using gfxstream::base::ConditionVariable;
@@ -561,8 +562,10 @@ bool SampleApplication::isSwANGLE() {
     const char* vendor;
     const char* renderer;
     const char* version;
-    mFb->getGLStrings(&vendor, &renderer, &version);
+    mFb->getDeviceInfo(&vendor, &renderer, &version);
     return strstr(renderer, "ANGLE") && strstr(renderer, "SwiftShader");
 }
 
+
+}  // namespace host
 }  // namespace gfxstream

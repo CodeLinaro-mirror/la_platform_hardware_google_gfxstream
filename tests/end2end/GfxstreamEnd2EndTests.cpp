@@ -14,6 +14,7 @@
 
 #include "GfxstreamEnd2EndTests.h"
 
+#include <cmath>
 #include <filesystem>
 
 #include <dlfcn.h>
@@ -711,19 +712,22 @@ Result<Ok> GfxstreamEnd2EndTest::FillAhb(ScopedAHardwareBuffer& ahb, PixelR8G8B8
         const Gralloc::LockedPlane& uPlane = planes[1];
         const Gralloc::LockedPlane& vPlane = planes[2];
 
-        colorY = 178;
-        colorU = 171;
-        colorV = 0;
-
+        // Y plane, full res
         for (uint32_t y = 0; y < ahbHeight; y++) {
             for (uint32_t x = 0; x < ahbWidth; x++) {
                 uint8_t* dstY =
                     yPlane.data + (y * yPlane.rowStrideBytes) + (x * yPlane.pixelStrideBytes);
-                uint8_t* dstU = uPlane.data + ((y / 2) * uPlane.rowStrideBytes) +
-                                ((x / 2) * uPlane.pixelStrideBytes);
-                uint8_t* dstV = vPlane.data + ((y / 2) * vPlane.rowStrideBytes) +
-                                ((x / 2) * vPlane.pixelStrideBytes);
                 *dstY = colorY;
+            }
+        }
+
+        // UV planes, half res
+        for (uint32_t UV_y = 0; UV_y < ahbHeight/2; UV_y++) {
+            for (uint32_t UV_x = 0; UV_x < ahbWidth/2; UV_x++) {
+                uint8_t* dstU = uPlane.data + (UV_y * uPlane.rowStrideBytes) +
+                                (UV_x * uPlane.pixelStrideBytes);
+                uint8_t* dstV = vPlane.data + (UV_y * vPlane.rowStrideBytes) +
+                                (UV_x * vPlane.pixelStrideBytes);
                 *dstU = colorU;
                 *dstV = colorV;
             }
@@ -749,6 +753,18 @@ Result<ScopedAHardwareBuffer> GfxstreamEnd2EndTest::CreateAHBFromImage(
         std::memcpy(ahbPixels, image.pixels.data(), image.pixels.size() * sizeof(uint32_t));
         ahb.Unlock();
     }
+
+    return std::move(ahb);
+}
+
+Result<ScopedAHardwareBuffer> GfxstreamEnd2EndTest::CreateAHBWithColor(const uint32_t width,
+                                                                       const uint32_t height,
+                                                                       const uint32_t ahbFormat,
+                                                                       const PixelR8G8B8A8& color) {
+    auto ahb =
+        GFXSTREAM_EXPECT(ScopedAHardwareBuffer::Allocate(*mGralloc, width, height, ahbFormat));
+
+    GFXSTREAM_EXPECT(FillAhb(ahb, color));
 
     return std::move(ahb);
 }
