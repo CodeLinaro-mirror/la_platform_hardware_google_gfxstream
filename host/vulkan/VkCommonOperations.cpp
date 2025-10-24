@@ -308,26 +308,24 @@ VkExternalMemoryHandleTypeFlagBits VkEmulation::getDefaultExternalMemoryHandleTy
 #endif
 }
 
-static bool extensionsSupported(const std::vector<VkExtensionProperties>& currentProps,
-                                const std::vector<const char*>& wantedExtNames) {
-    std::vector<bool> foundExts(wantedExtNames.size(), false);
-
+static bool extensionSupported(const std::vector<VkExtensionProperties>& currentProps,
+                               const char* wantedExtName) {
     for (uint32_t i = 0; i < currentProps.size(); ++i) {
-        for (size_t j = 0; j < wantedExtNames.size(); ++j) {
-            if (!strcmp(wantedExtNames[j], currentProps[i].extensionName)) {
-                foundExts[j] = true;
-            }
+        if (!strcmp(wantedExtName, currentProps[i].extensionName)) {
+            return true;
         }
     }
+    return false;
+}
 
+static bool extensionsSupported(const std::vector<VkExtensionProperties>& currentProps,
+                                const std::vector<const char*>& wantedExtNames) {
     for (size_t i = 0; i < wantedExtNames.size(); ++i) {
-        bool found = foundExts[i];
-        if (!found) {
+        if (!extensionSupported(currentProps, wantedExtNames[i])) {
             GFXSTREAM_DEBUG("%s not found, bailing.", wantedExtNames[i]);
             return false;
         }
     }
-
     return true;
 }
 
@@ -906,7 +904,7 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     std::unordered_set<std::string> selectedInstanceExtensionNames;
 
     const bool debugUtilsSupported =
-        extensionsSupported(instanceExts, {VK_EXT_DEBUG_UTILS_EXTENSION_NAME});
+        extensionSupported(instanceExts, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     const bool debugUtilsRequested = emulation->mFeatures.VulkanDebugUtils.enabled;
     const bool debugUtilsAvailableAndRequested = debugUtilsSupported && debugUtilsRequested;
     if (debugUtilsAvailableAndRequested) {
@@ -991,6 +989,12 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
     VkResult res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
     if (res != VK_SUCCESS) {
         GFXSTREAM_ERROR("Failed to create Vulkan instance. Error %s.", string_VkResult(res));
+        if (res == VK_ERROR_EXTENSION_NOT_PRESENT) {
+            for (const char* ext : selectedInstanceExtensionNamesC) {
+                GFXSTREAM_ERROR("%s - %sSUPPORTED", ext,
+                                (extensionSupported(instanceExts, ext) ? "" : "UN"));
+            }
+        }
         return nullptr;
     }
 
@@ -1076,11 +1080,15 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
 #if defined(__APPLE__)
     if (emulation->mInstanceSupportsExternalMemoryMetal) {
-        // Enable some specific extensions on MacOS when moltenVK is used.
-        externalMemoryDeviceExtNames.push_back(VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
+        // Enable some specific extensions on MacOS when ExternalMemoryMetal is used.
         externalMemoryDeviceExtNames.push_back(VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME);
+        if (emulation->mInstanceSupportsMoltenVK) {
+            // TODO(b/433496880) Check if this extension is also needed also with kosmickrisp path
+            externalMemoryDeviceExtNames.push_back(VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
+        }
     } else {
-        // When MoltenVK is not used(e.g. SwiftShader), use memory fd extension for external memory.
+        // When ExternalMemoryMetal is not used(e.g. SwiftShader), use memory fd extension for
+        // external memory.
         externalMemoryDeviceExtNames.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
     }
 #endif
@@ -1667,6 +1675,12 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
 
     emulation->mTransferQueueCommandBufferPool.resize(0);
 
+    if (emulation->mDeviceInfo.supportsSamplerYcbcrConversion) {
+        if (!emulation->mYcbcrSamplerPool.init(dvk, emulation->mDevice)) {
+            GFXSTREAM_ERROR("Failed: Could create ycbcr sampler pool for Vulkan emulation");
+        }
+    }
+
     return emulation;
 }
 
@@ -1706,7 +1720,7 @@ void VkEmulation::initFeatures(Features features) {
             GFXSTREAM_ERROR("Reset VkEmulation::compositorVk.");
         }
         mCompositorVk = CompositorVk::create(*mIvk, mDevice, mPhysicalDevice, mQueue, mQueueLock,
-                                             mQueueFamilyIndex, 3, mDebugUtilsHelper);
+                                             mQueueFamilyIndex, 3, &mYcbcrSamplerPool, mDebugUtilsHelper);
     }
 
     if (features.useVulkanNativeSwapchain) {
@@ -1744,6 +1758,8 @@ VkEmulation::~VkEmulation() {
     mCompositorVk.reset();
     mDisplayVk.reset();
     mUdmabufCreator.reset();
+
+    mYcbcrSamplerPool.destroy();
 
     mStaging.destroy(mDvk, mDevice);
 
@@ -1978,12 +1994,6 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
     auto allocInfoChain = vk_make_chain_iterator(&allocInfo);
 
     if (mDeviceInfo.supportsExternalMemoryExport) {
-#ifdef __APPLE__
-        if (mInstanceSupportsMoltenVK) {
-            // Change handle type for metal resources
-            exportAi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
-        }
-#endif
         if (mDeviceInfo.supportsDmaBuf) {
             exportAi.handleTypes |= VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
         }
@@ -2108,7 +2118,7 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
 
     bool opaqueFd = true;
 #if defined(__APPLE__)
-    if (mInstanceSupportsMoltenVK) {
+    if (mInstanceSupportsExternalMemoryMetal) {
         opaqueFd = false;
         info->externalMetalHandle = getMtlResourceFromVkDeviceMemory(vk, info->memory);
         validHandle = (nullptr != info->externalMetalHandle);
@@ -2242,7 +2252,7 @@ bool VkEmulation::importExternalMemory(VulkanDispatch* vk, VkDevice targetDevice
     VkImportMemoryMetalHandleInfoEXT importInfoMetalInfo = {
         VK_STRUCTURE_TYPE_IMPORT_MEMORY_METAL_HANDLE_INFO_EXT, dedicatedAllocInfoPtr,
         VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT, nullptr};
-    if (mInstanceSupportsMoltenVK) {
+    if (mInstanceSupportsExternalMemoryMetal) {
         importInfoMetalInfo.handle = info->externalMetalHandle;
         importInfoPtr = &importInfoMetalInfo;
     }
@@ -2679,7 +2689,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         static_cast<VkExternalMemoryHandleTypeFlags>(getDefaultExternalMemoryHandleType()),
     };
 #if defined(__APPLE__)
-    if (mInstanceSupportsMoltenVK) {
+    if (mInstanceSupportsExternalMemoryMetal) {
         // Using a different handle type when in MoltenVK mode
         extImageCi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
     }
@@ -2735,7 +2745,7 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
         }
 #if defined(__APPLE_)
         // importExtMemoryHandleToVkColorBuffer is not supported with MoltenVK
-        if (mInstanceSupportsMoltenVK) {
+        if (mInstanceSupportsExternalMemoryMetal) {
             GFXSTREAM_WARNING("extMemhandleInfo import in ColorBuffer creation is unexpected.");
             infoPtr->memory.externalMetalHandle = nullptr;
         }
@@ -2818,39 +2828,16 @@ bool VkEmulation::createVkColorBufferLocked(uint32_t width, uint32_t height, GLe
 
     VkSamplerYcbcrConversionInfo ycbcrInfo = {VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
                                               nullptr, VK_NULL_HANDLE};
-    const bool addConversion = formatRequiresYcbcrConversion(imageVkFormat);
+    bool addConversion = formatRequiresYcbcrConversion(imageVkFormat);
     if (addConversion) {
-        if (!mDeviceInfo.supportsSamplerYcbcrConversion) {
-            GFXSTREAM_ERROR(
-                "VkFormat: %d requires conversion, but device does not have required extension "
-                " for conversion (%s)",
-                imageVkFormat, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
-            return false;
+        ycbcrInfo.conversion = mYcbcrSamplerPool.getConversion(imageVkFormat);
+        if (ycbcrInfo.conversion == VK_NULL_HANDLE) {
+            // We intentionally do no fail color buffer creation on this error, as
+            // the image view and the conversion may be unused.
+            GFXSTREAM_ERROR("Could not get ycbcr conversion object for VkFormat: %s [%d]",
+                            string_VkFormat(imageVkFormat), imageVkFormat);
+            addConversion = false;
         }
-        VkSamplerYcbcrConversionCreateInfo ycbcrCreateInfo = {
-            VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
-            nullptr,
-            imageVkFormat,
-            VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY,
-            VK_SAMPLER_YCBCR_RANGE_ITU_FULL,
-            {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-             VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
-            VK_CHROMA_LOCATION_MIDPOINT,
-            VK_CHROMA_LOCATION_MIDPOINT,
-            VK_FILTER_NEAREST,
-            VK_FALSE};
-
-        createRes = vk->vkCreateSamplerYcbcrConversion(mDevice, &ycbcrCreateInfo, nullptr,
-                                                       &infoPtr->ycbcrConversion);
-        if (createRes != VK_SUCCESS) {
-            GFXSTREAM_DEBUG(
-                "Failed to create Vulkan ycbcrConversion for ColorBuffer %d with format %s [%d], "
-                "Error: %s",
-                colorBufferHandle, string_VkFormat(imageVkFormat), imageVkFormat,
-                string_VkResult(createRes));
-            return false;
-        }
-        ycbcrInfo.conversion = infoPtr->ycbcrConversion;
     }
 
     const VkImageViewCreateInfo imageViewCi = {
@@ -2984,9 +2971,6 @@ bool VkEmulation::teardownVkColorBufferLocked(uint32_t colorBufferHandle) {
             VK_CHECK(vk->vkQueueWaitIdle(mQueue));
         }
         vk->vkDestroyImageView(mDevice, info.imageView, nullptr);
-        if (mDeviceInfo.hasSamplerYcbcrConversionExtension) {
-            vk->vkDestroySamplerYcbcrConversion(mDevice, info.ycbcrConversion, nullptr);
-        }
         vk->vkDestroyImage(mDevice, info.image, nullptr);
         freeExternalMemoryLocked(vk, &info.memory);
     }
@@ -4050,7 +4034,7 @@ VkExternalMemoryHandleTypeFlags VkEmulation::transformExternalMemoryHandleTypeFl
 
     VkExternalMemoryHandleTypeFlagBits handleTypeUsed = getDefaultExternalMemoryHandleType();
 #if defined(__APPLE__)
-    if (mInstanceSupportsMoltenVK) {
+    if (mInstanceSupportsExternalMemoryMetal) {
         // Using a different handle type when in MoltenVK mode
         handleTypeUsed = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
     }

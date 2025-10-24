@@ -1423,10 +1423,10 @@ class VkDecoderGlobalState::Impl {
         } else {
             // No instance extension, fake it!!!!
             if (pFeatures->pNext) {
-                fprintf(stderr,
+                GFXSTREAM_WARNING(
                         "%s: Warning: Trying to use extension struct in "
                         "VkPhysicalDeviceFeatures2 without having enabled "
-                        "the extension!\n",
+                        "the extension!",
                         __func__);
             }
             *pFeatures = {
@@ -1578,10 +1578,10 @@ class VkDecoderGlobalState::Impl {
         } else {
             // No instance extension, fake it!!!!
             if (pImageFormatProperties->pNext) {
-                fprintf(stderr,
+                GFXSTREAM_WARNING(
                         "%s: Warning: Trying to use extension struct in "
                         "VkPhysicalDeviceFeatures2 without having enabled "
-                        "the extension!!!!11111\n",
+                        "the extension!",
                         __func__);
             }
             *pImageFormatProperties = {
@@ -1687,10 +1687,10 @@ class VkDecoderGlobalState::Impl {
             case WhichFunc::kGetPhysicalDeviceFormatProperties: {
                 // No instance extension, fake it!!!!
                 if (pFormatProperties->pNext) {
-                    fprintf(stderr,
+                    GFXSTREAM_WARNING(
                             "%s: Warning: Trying to use extension struct in "
                             "vkGetPhysicalDeviceFormatProperties2 without having "
-                            "enabled the extension!!!!11111\n",
+                            "enabled the extension!",
                             __func__);
                 }
                 pFormatProperties->sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
@@ -1742,10 +1742,10 @@ class VkDecoderGlobalState::Impl {
         } else {
             // No instance extension, fake it!!!!
             if (pProperties->pNext) {
-                fprintf(stderr,
+                GFXSTREAM_WARNING(
                         "%s: Warning: Trying to use extension struct in "
                         "VkPhysicalDeviceProperties2 without having enabled "
-                        "the extension!!!!11111\n",
+                        "the extension!",
                         __func__);
             }
             *pProperties = {
@@ -1869,10 +1869,10 @@ class VkDecoderGlobalState::Impl {
         } else {
             // No instance extension, fake it!!!!
             if (pMemoryProperties->pNext) {
-                fprintf(stderr,
+                GFXSTREAM_WARNING(
                         "%s: Warning: Trying to use extension struct in "
                         "VkPhysicalDeviceMemoryProperties2 without having enabled "
-                        "the extension!!!!11111\n",
+                        "the extension!",
                         __func__);
             }
             *pMemoryProperties = {
@@ -1897,7 +1897,7 @@ class VkDecoderGlobalState::Impl {
 
         bool shouldPassthrough = !m_vkEmulation->isYcbcrEmulationEnabled();
 #if defined(__APPLE__)
-        shouldPassthrough = shouldPassthrough && !m_vkEmulation->supportsMoltenVk();
+        shouldPassthrough = shouldPassthrough && !m_vkEmulation->supportsExternalMemoryMetal();
 #endif
         if (shouldPassthrough) {
             return vk->vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName,
@@ -1915,8 +1915,10 @@ class VkDecoderGlobalState::Impl {
 
 #if defined(__APPLE__) && defined(VK_MVK_moltenvk)
         // Guest will check for VK_MVK_moltenvk extension for enabling AHB support
-        if (m_vkEmulation->supportsMoltenVk() &&
+        if (m_vkEmulation->supportsExternalMemoryMetal() &&
             !hasDeviceExtension(properties, VK_MVK_MOLTENVK_EXTENSION_NAME)) {
+            // TODO(b/433496880): make sure any relevant guest image will check external memory
+            // metal instead
             VkExtensionProperties mvk_props;
             strncpy(mvk_props.extensionName, VK_MVK_MOLTENVK_EXTENSION_NAME,
                     sizeof(mvk_props.extensionName));
@@ -2139,7 +2141,7 @@ class VkDecoderGlobalState::Impl {
             vk->vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
 
             if (mVerbosePrints) {
-                fprintf(stderr,
+                GFXSTREAM_VERBOSE(
                         "VERBOSE:%s: MoltenVK supportedPortabilityFeatures\n"
                         "constantAlphaColorBlendFactors = %d\n"
                         "events = %d\n"
@@ -2882,7 +2884,10 @@ class VkDecoderGlobalState::Impl {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
 
-        //TODO(b/438924843) this is probably not optimal as it might slow down image creation a bit.
+#ifdef __APPLE__
+        // TODO(b/438924843) this is probably not optimal as it might slow down image creation a
+        // bit. Not validating the dimensions seems to be only fatal on macOS, and can create false
+        // positives on desktop GPUs with the format's support, so it's only checked on macOS.
         {
             auto physicalDevice = deviceInfo->physicalDevice;
             auto* physdevInfo = gfxstream::base::find(mPhysdevInfo, physicalDevice);
@@ -2907,7 +2912,7 @@ class VkDecoderGlobalState::Impl {
                 GFXSTREAM_WARNING(
                     "vkCreateImage: vkGetPhysicalDeviceImageFormatProperties failed with %s",
                     string_VkResult(res));
-                return res;
+                return VK_ERROR_VALIDATION_FAILED_EXT;
             }
 
             if (pCreateInfo->extent.width > imageFormatProperties.maxExtent.width ||
@@ -2922,6 +2927,7 @@ class VkDecoderGlobalState::Impl {
                 return VK_ERROR_VALIDATION_FAILED_EXT;
             }
         }
+#endif
 
         const bool needDecompression = deviceInfo->needEmulatedDecompression(pCreateInfo->format);
         std::unique_ptr<CompressedImageInfo> cmpInfo = nullptr;
@@ -3136,7 +3142,7 @@ class VkDecoderGlobalState::Impl {
 #ifdef CONFIG_AEMU
         if (bindInfoCount > 1 && snapshotsEnabled()) {
             if (mVerbosePrints) {
-                fprintf(stderr,
+                GFXSTREAM_WARNING(
                     "vkBindImageMemory2 with more than 1 bindInfoCount not supporting snapshot");
             }
             get_gfxstream_vm_operations().set_skip_snapshot_save(true);
@@ -5873,9 +5879,9 @@ class VkDecoderGlobalState::Impl {
                             importCbInfoPtr->colorBuffer);
 
                     if (cbExtMemoryHandle == nullptr) {
-                        fprintf(stderr,
+                        GFXSTREAM_ERROR(
                                 "%s: VK_ERROR_OUT_OF_DEVICE_MEMORY: "
-                                "colorBuffer 0x%x does not have Vulkan external memory backing\n",
+                                "colorBuffer 0x%x does not have Vulkan external memory backing",
                                 __func__, importCbInfoPtr->colorBuffer);
                         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                     }
@@ -5954,10 +5960,10 @@ class VkDecoderGlobalState::Impl {
                     m_vkEmulation->getBufferMetalMemoryHandle(importBufferInfoPtr->buffer);
 
                 if (bufferMetalMemoryHandle == nullptr) {
-                    fprintf(stderr,
+                    GFXSTREAM_ERROR(
                             "%s: VK_ERROR_OUT_OF_DEVICE_MEMORY: "
                             "buffer 0x%x does not have Vulkan external memory "
-                            "backing\n",
+                            "backing",
                             __func__, importBufferInfoPtr->buffer);
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
@@ -6125,9 +6131,10 @@ class VkDecoderGlobalState::Impl {
                 importFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
                 vk_append_struct(&structChainIter, &importFdInfo);
 #else
+                (void)virtioGpuContextId;  // suppress warnings
+                (void)deviceHasDmabufExt;
                 GFXSTREAM_ERROR("Guest Handle flow should not work here");
                 return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-
 #endif
             } else if (m_vkEmulation->getFeatures().SystemBlob.enabled ||
                        m_vkEmulation->getFeatures().VulkanAllocateHostVisibleAsUdmabuf.enabled) {
@@ -6682,9 +6689,9 @@ class VkDecoderGlobalState::Impl {
         auto vk = dispatch_VkDevice(boxed_device);
 
         if (!m_vkEmulation->getFeatures().GlDirectMem.enabled) {
-            fprintf(stderr,
-                    "FATAL: Tried to use direct mapping "
-                    "while GlDirectMem is not enabled!\n");
+            GFXSTREAM_ERROR(
+                "FATAL: Tried to use direct mapping "
+                "while GlDirectMem is not enabled!");
         }
 
         std::lock_guard<std::mutex> lock(mMutex);
@@ -8738,7 +8745,7 @@ class VkDecoderGlobalState::Impl {
             uint64_t poolId = pDescriptorSetPoolIds[i];
             uint32_t whichPool = pDescriptorSetWhichPool[i];
             uint32_t pendingAlloc = pDescriptorSetPendingAllocation[i];
-            bool didAllocThisTime;
+            bool didAllocThisTime = false;
             setsToUpdate[i] = getOrAllocateDescriptorSetFromPoolAndIdLocked(
                 vk, device, pDescriptorPools[whichPool], pDescriptorSetLayouts[i], poolId,
                 pendingAlloc, &didAllocThisTime);
@@ -8798,6 +8805,20 @@ class VkDecoderGlobalState::Impl {
                 (VkSamplerYcbcrConversion)((uintptr_t)0xffff0000ull));
             return VK_SUCCESS;
         }
+
+        if (pCreateInfo->pNext == nullptr && pCreateInfo->format == VK_FORMAT_UNDEFINED) {
+            // At this point we should have removed any external format structures on pNext for this
+            // call, and the format must be valid. Creating conversion objects with invalid formats
+            // might succeed on the driver call, but will cause crashes when used in descriptor set
+            // layouts.
+            // VUID-VkSamplerYcbcrConversionCreateInfo-format-04061 If an external format
+            // conversion is not being created, format must represent unsigned normalized values
+            // (i.e. the format must be a UNORM format)
+            GFXSTREAM_ERROR("%s: Invalid format provided: %s", __func__,
+                            string_VkFormat(pCreateInfo->format));
+            return VK_ERROR_VALIDATION_FAILED_EXT;
+        }
+
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
         VkResult res =
@@ -9564,7 +9585,7 @@ class VkDecoderGlobalState::Impl {
         return std::nullopt;
 #endif
 
-        return std::move(ret);
+        return ret;
     }
 
     void getSupportedSemaphoreHandleTypes(VulkanDispatch* vk, VkPhysicalDevice physicalDevice,

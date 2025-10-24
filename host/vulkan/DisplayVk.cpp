@@ -109,6 +109,11 @@ void DisplayVk::drainQueues() {
     }
 }
 
+void DisplayVk::clear() {
+    // Report once, as it's generally not a fatal issue but may cause graphical issues.
+    ERR_ONCE("DisplayVk::%s: Unimplemented", __func__);
+}
+
 void DisplayVk::bindToSurfaceImpl(gfxstream::DisplaySurface* surface) {
     m_needToRecreateSwapChain = true;
 }

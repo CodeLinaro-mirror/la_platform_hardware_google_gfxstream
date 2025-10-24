@@ -34,6 +34,9 @@ static std::string icdJsonNameToProgramAndLauncherPaths(const std::string& icdFi
     if (!pathExists(fullpath.c_str())) {
         fullpath = pj({gfxstream::base::getLauncherDirectory(), suffix});
     }
+    if (!pathExists(fullpath.c_str())) {
+        fullpath = pj({gfxstream::base::getLauncherDirectory(), "lib", "qemu", suffix});
+    }
     return fullpath;
 }
 
@@ -67,11 +70,17 @@ static void initIcdPaths(bool forTesting) {
     } else {
 #ifdef __APPLE__
         // Mac: Use MoltenVK by default unless GPU mode is set to swiftshader
-        if (androidIcd != "moltenvk") {
-            GFXSTREAM_WARNING("%s: Unknown ICD, resetting to MoltenVK", __func__);
+        if (androidIcd == "kosmickrisp") {
+            gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "kosmickrisp");
+            setIcdPaths("kosmickrisp_icd.json");
+        } else {
+            if (androidIcd != "moltenvk") {
+                GFXSTREAM_WARNING("%s: Unknown ICD (%s), resetting to MoltenVK", __func__,
+                                  androidIcd.c_str());
+            }
             gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "moltenvk");
+            setIcdPaths("MoltenVK_icd.json");
         }
-        setIcdPaths("MoltenVK_icd.json");
 
         // Configure MoltenVK library with environment variables
         // 0: No logging.
