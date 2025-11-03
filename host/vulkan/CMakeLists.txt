@@ -61,7 +61,7 @@ target_link_libraries(gfxstream-vulkan-server PUBLIC
         gfxstream_common_base
         gfxstream_common_logging
         gfxstream_features
-        gfxstream_host_backend
+        gfxstream_host_common
         gfxstream_host_compressed_textures
         gfxstream_host_iostream
         gfxstream_host_library
@@ -70,6 +70,7 @@ target_link_libraries(gfxstream-vulkan-server PUBLIC
         gfxstream_host_tracing
         gfxstream_openglesdispatch.headers
         gfxstream_vulkan_headers
+        gfxstream_xcb_headers
         OpenglRender_vulkan_cereal
         PRIVATE
         gfxstream_opengl_headers

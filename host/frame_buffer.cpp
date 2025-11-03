@@ -35,7 +35,7 @@
 #include "host/gl/render_thread_info_gl.h"
 #include "host/gl/yuv_converter.h"
 #include "gl/gles2_dec/gles2_dec.h"
-#include "gl/glestranslator/EGL/EglGlobalInfo.h"
+#include "gl/glestranslator/egl/egl_global_info.h"
 #endif
 
 #include "host/gl/context_helper.h"
@@ -43,7 +43,7 @@
 #include "native_sub_window.h"
 #include "render_thread_info.h"
 #include "sync_thread.h"
-#include "gfxstream/SharedLibrary.h"
+#include "gfxstream/shared_library.h"
 #include "gfxstream/Tracing.h"
 #include "gfxstream/common/logging.h"
 #include "gfxstream/containers/Lookup.h"
@@ -4356,7 +4356,17 @@ void FrameBuffer::Impl::createYUVTextures(uint32_t type, uint32_t count, int wid
                                           uint32_t* output) {
     FrameworkFormat format = static_cast<FrameworkFormat>(type);
     AutoLock mutex(m_lock);
-    RecursiveScopedContextBind bind(getPbufferSurfaceContextHelper());
+    auto contextHelper = getPbufferSurfaceContextHelper();
+    if (!contextHelper) {
+        // This should not be called in vulkan-only mode
+        GFXSTREAM_ERROR("%s: invalid pbuffer surface context", __func__);
+        return;
+    }
+    RecursiveScopedContextBind bind(contextHelper);
+    if (!bind.isOk()) {
+        GFXSTREAM_ERROR("%s: could not bind context helper", __func__);
+        return;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         if (format == FRAMEWORK_FORMAT_NV12) {
             YUVConverter::createYUVGLTex(GL_TEXTURE0, width, height, format, m_features.Yuv420888ToNv21.enabled,

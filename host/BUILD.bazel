@@ -67,13 +67,14 @@ cc_library(
         ":gfxstream_backend_headers",
         "//common/base:gfxstream_common_base",
         "//common/logging:gfxstream_common_logging",
-        "//host/backend:gfxstream_host_backend",
+        "//host/common:gfxstream_host_common",
         "//host/features:gfxstream_host_features",
         "//host/snapshot:gfxstream_host_snapshot",
         "//third_party/opengl:gfxstream_egl_headers",
         "//third_party/opengl:gfxstream_gles2_headers",
         "//third_party/opengl:gfxstream_gles3_headers",
         "//third_party/vulkan:gfxstream_vulkan_headers",
+        "//third_party/xcb",
     ],
 )
 
@@ -190,10 +191,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":gfxstream_backend_headers",
+        ":gfxstream_host_headers",
         "//common/base:gfxstream_common_base",
         "//common/logging:gfxstream_common_logging",
         "//host/address_space:gfxstream_host_address_space",
-        "//host/backend:gfxstream_host_backend",
+        "//host/common:gfxstream_host_common",
         "//host/compressed_textures:gfxstream_host_compressed_textures",
         "//host/decoder_common:gfxstream_host_decoder_common",
         "//host/features:gfxstream_host_features",
@@ -204,7 +206,7 @@ cc_library(
         "//host/gl:gles2_dec",
         "//host/gl/OpenGLESDispatch:gfxstream_host_openglesdispatch",
         "//host/gl/OpenGLESDispatch:gfxstream_host_openglesdispatch_headers",
-        "//host/gl/glestranslator/GLES_CM:GLES_CM_translator_static",
+        "//host/gl/glestranslator/gles_cm:gles_cm_translator_static",
         "//host/iostream:gfxstream_host_iostream",
         "//host/library:gfxstream_host_library",
         "//host/renderControl_dec",
@@ -217,6 +219,7 @@ cc_library(
         "//third_party/opengl:gfxstream_gles2_headers",
         "//third_party/opengl:gfxstream_gles3_headers",
         "//third_party/vulkan:gfxstream_vulkan_headers",
+        "//third_party/xcb",
     ] + select({
         "@platforms//os:macos": [
             ":gfxstream_backend_static-darwin",
@@ -285,7 +288,7 @@ cc_test(
     deps = [
         ":gfxstream_backend_static",
         "//common/base:gfxstream_common_base",
-        "//host/backend:gfxstream_host_backend",
+        "//host/common:gfxstream_host_common",
         "//host/features:gfxstream_host_features",
         "//host/testlibs/oswindow:gfxstream_oswindow_test_support",
         "//host/testlibs/support:gfxstream_host_testing_support",
