@@ -984,14 +984,15 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
 #endif
         };
         impl->m_emulationVk = vk::VkEmulation::create(vkDispatch, callbacks, impl->m_features);
-        if (impl->m_emulationVk) {
-            vk::VkDecoderGlobalState::initialize(impl->m_emulationVk.get());
-        } else {
+        if (!impl->m_emulationVk) {
             GFXSTREAM_ERROR(
-                "Failed to initialize global Vulkan emulation. Disable the Vulkan support.");
+                "Failed to initialize global Vulkan emulation requested. Vulkan feature should be "
+                "disabled.");
+            return nullptr;
         }
-    }
-    if (impl->m_emulationVk) {
+
+        vk::VkDecoderGlobalState::initialize(impl->m_emulationVk.get());
+
         impl->m_vulkanEnabled = true;
         if (impl->m_features.VulkanNativeSwapchain.enabled) {
             impl->m_vkInstance = impl->m_emulationVk->getInstance();
@@ -1123,18 +1124,19 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     }
 
     if (impl->m_emulationVk && impl->m_useVulkanComposition) {
-        impl->m_compositor = impl->m_emulationVk->getCompositor();
-        if (!impl->m_compositor) {
-            GFXSTREAM_ERROR("Failed to get CompositorVk from VkEmulation.");
-            return nullptr;
-        }
         GFXSTREAM_DEBUG("Performing composition using CompositorVk.");
+        impl->m_compositor = impl->m_emulationVk->getCompositor();
     } else {
-        GFXSTREAM_DEBUG("Performing composition using CompositorGl.");
 #if GFXSTREAM_ENABLE_HOST_GLES
-        auto compositorGl = impl->m_emulationGl->getCompositor();
-        impl->m_compositor = compositorGl;
+        if (impl->m_emulationGl) {
+            GFXSTREAM_DEBUG("Performing composition using CompositorGl.");
+            impl->m_compositor = impl->m_emulationGl->getCompositor();
+        }
 #endif
+    }
+    if (!impl->m_compositor) {
+        GFXSTREAM_ERROR("Failed to initialize the compositor.");
+        return nullptr;
     }
 
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -2272,12 +2274,6 @@ bool FrameBuffer::Impl::getBufferInfo(HandleType p_buffer, int* size) {
 }
 
 bool FrameBuffer::Impl::post(HandleType p_colorbuffer, bool needLockAndBind) {
-#if GFXSTREAM_ENABLE_HOST_GLES
-    if (m_features.GuestVulkanOnly.enabled) {
-        flushColorBufferFromGl(p_colorbuffer);
-    }
-#endif
-
     auto res = postImplSync(p_colorbuffer, needLockAndBind);
     if (res) setGuestPostedAFrame();
     return res;
@@ -2285,12 +2281,6 @@ bool FrameBuffer::Impl::post(HandleType p_colorbuffer, bool needLockAndBind) {
 
 void FrameBuffer::Impl::postWithCallback(HandleType p_colorbuffer,
                                          Post::CompletionCallback callback, bool needLockAndBind) {
-#if GFXSTREAM_ENABLE_HOST_GLES
-    if (m_features.GuestVulkanOnly.enabled) {
-        flushColorBufferFromGl(p_colorbuffer);
-    }
-#endif
-
     AsyncResult res = postImpl(p_colorbuffer, callback, needLockAndBind);
     if (res.Succeeded()) {
         setGuestPostedAFrame();
