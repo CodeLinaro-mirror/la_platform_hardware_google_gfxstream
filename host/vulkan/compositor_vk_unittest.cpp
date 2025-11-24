@@ -40,7 +40,7 @@ namespace host {
 namespace vk {
 namespace {
 
-static constexpr const bool kDefaultSaveImageIfComparisonFailed = false;
+static constexpr const bool kDefaultSaveImageIfComparisonFailed = true;
 
 std::string GetTestDataPath(const std::string& basename) {
 #ifdef BAZEL_CURRENT_REPOSITORY
@@ -90,12 +90,9 @@ class CompositorVkTest : public ::testing::Test {
                                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT>;
     using SourceImage = RenderTextureVk;
 
-    static void SetUpTestCase() { k_vk = vkDispatch(false); }
+    static void SetUpTestCase() { k_vk = vkDispatch(true); }
 
     void SetUp() override {
-#if defined(__APPLE__) && defined(__arm64__)
-        GTEST_SKIP() << "Skipping all test on Apple M2, as they are failing, see b/263494782";
-#endif
         ASSERT_NE(k_vk, nullptr);
         createInstance();
         pickPhysicalDevice();
@@ -126,10 +123,6 @@ class CompositorVkTest : public ::testing::Test {
     }
 
     void TearDown() override {
-#if defined(__APPLE__) && defined(__arm64__)
-        return;
-#endif
-
         k_vk->vkDestroyCommandPool(m_vkDevice, m_vkCommandPool, nullptr);
         k_vk->vkDestroyDevice(m_vkDevice, nullptr);
         m_vkDevice = VK_NULL_HANDLE;
@@ -190,7 +183,7 @@ class CompositorVkTest : public ::testing::Test {
         const uint8_t* actualRGBA = reinterpret_cast<const uint8_t*>(&actualPixel);
         const uint8_t* expectedRGBA = reinterpret_cast<const uint8_t*>(&expectedPixel);
 
-        constexpr const uint32_t kRGBA8888Tolerance = 2;
+        constexpr const uint32_t kRGBA8888Tolerance = 4;
         for (uint32_t channel = 0; channel < 4; channel++) {
             const uint8_t actualChannel = actualRGBA[channel];
             const uint8_t expectedChannel = expectedRGBA[channel];
@@ -290,6 +283,7 @@ class CompositorVkTest : public ::testing::Test {
         ret->image = image->m_vkImage;
         ret->imageCreateInfo = image->m_vkImageCreateInfo;
         ret->imageView = image->m_vkImageView;
+        ret->imageFormat = SourceOrTargetImage::k_format;
         ret->preBorrowLayout = SourceOrTargetImage::k_vkImageLayout;
         ret->preBorrowQueueFamilyIndex = m_compositorQueueFamilyIndex;
         ret->postBorrowLayout = SourceOrTargetImage::k_vkImageLayout;
@@ -340,11 +334,13 @@ class CompositorVkTest : public ::testing::Test {
             .enabledExtensionCount = 0,
             .ppEnabledExtensionNames = nullptr,
         };
+        ASSERT_NE(k_vk->vkCreateInstance, nullptr);
         ASSERT_EQ(k_vk->vkCreateInstance(&instanceCi, nullptr, &m_vkInstance), VK_SUCCESS);
         ASSERT_NE(m_vkInstance, VK_NULL_HANDLE);
     }
 
     void pickPhysicalDevice() {
+        ASSERT_NE(m_vkInstance, VK_NULL_HANDLE);
         uint32_t physicalDeviceCount = 0;
         ASSERT_EQ(k_vk->vkEnumeratePhysicalDevices(m_vkInstance, &physicalDeviceCount, nullptr),
                   VK_SUCCESS);

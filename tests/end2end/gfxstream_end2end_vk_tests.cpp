@@ -299,10 +299,8 @@ class GfxstreamEnd2EndVkTest : public GfxstreamEnd2EndTest {
             const vkhpp::SamplerYcbcrConversionCreateInfo conversionCreateInfo = {
                 .pNext = &externalFormat,
                 .format = static_cast<vkhpp::Format>(ahbFormatProperties.format),
-                .ycbcrModel = static_cast<vkhpp::SamplerYcbcrModelConversion>(
-                    ahbFormatProperties.suggestedYcbcrModel),
-                .ycbcrRange =
-                    static_cast<vkhpp::SamplerYcbcrRange>(ahbFormatProperties.suggestedYcbcrRange),
+                .ycbcrModel = vkhpp::SamplerYcbcrModelConversion::eYcbcr601,
+                .ycbcrRange = vkhpp::SamplerYcbcrRange::eItuNarrow,
                 .components =
                     {
                         .r = static_cast<vkhpp::ComponentSwizzle>(
@@ -2484,26 +2482,26 @@ INSTANTIATE_TEST_SUITE_P(GfxstreamEnd2EndTests, GfxstreamEnd2EndVkTest, ::testin
                                  TestParams{
                                      .with_gl = false,
                                      .with_vk = true,
-                                     .with_transport = GfxstreamTransport::kVirtioGpuAsg,
                                      .with_features = {"MinimalLogging"},
+                                     .with_transport = GfxstreamTransport::kVirtioGpuAsg,
                                  },
                                  TestParams{
                                      .with_gl = true,
                                      .with_vk = true,
-                                     .with_transport = GfxstreamTransport::kVirtioGpuAsg,
                                      .with_features = {"MinimalLogging"},
+                                     .with_transport = GfxstreamTransport::kVirtioGpuAsg,
                                  },
                                  TestParams{
                                      .with_gl = false,
                                      .with_vk = true,
-                                     .with_transport = GfxstreamTransport::kVirtioGpuPipe,
                                      .with_features = {"MinimalLogging"},
+                                     .with_transport = GfxstreamTransport::kVirtioGpuPipe,
                                  },
                                  TestParams{
                                      .with_gl = true,
                                      .with_vk = true,
-                                     .with_transport = GfxstreamTransport::kVirtioGpuPipe,
                                      .with_features = {"MinimalLogging"},
+                                     .with_transport = GfxstreamTransport::kVirtioGpuPipe,
                                  }};
                              cases = WithAndWithoutFeatures(cases, {"VulkanSnapshots"});
                              cases =
