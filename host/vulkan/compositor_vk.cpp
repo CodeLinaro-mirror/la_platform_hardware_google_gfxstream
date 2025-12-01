@@ -1638,14 +1638,16 @@ void CompositorVk::drawScreenMask(VkCommandBuffer commandBuffer, VkFormat target
     }
 
     drawImage(commandBuffer, targetFormat, targetWidth, targetHeight, targetRenderPass,
-              targetFramebuffer, frameResources, m_screenMaskImage.m_vkImageView, rotationDegrees);
+              targetFramebuffer, frameResources, m_screenMaskImage.m_vkImageView, rotationDegrees,
+              std::nullopt);
 }
 
 void CompositorVk::drawImage(VkCommandBuffer commandBuffer, VkFormat targetFormatVk,
                              uint32_t targetWidth, uint32_t targetHeight,
                              VkRenderPass targetRenderPass, VkFramebuffer targetFramebuffer,
                              ImmediateModeResources* frameResources, VkImageView imageView,
-                             float rotationDegrees) {
+                             float rotationDegrees,
+                             const std::optional<std::array<float, 16>>& colorTransform) {
     if (frameResources->m_curDataIndex >= kMaxImmediateDrawsPerFrame) {
         GFXSTREAM_ERROR("CompositorVk::%s Requested too many immediate mode draws", __func__);
         return;
@@ -1683,17 +1685,44 @@ void CompositorVk::drawImage(VkCommandBuffer commandBuffer, VkFormat targetForma
         frameResources->m_uboStorages[frameResources->m_curDataIndex];
     frameResources->m_curDataIndex++;
 
+    // Determine the texture coordinate translation to ensure clamped texture addressing will work
+    float texCoordTranslateX = 0;
+    float texCoordTranslateY = 0;
+    const float epsilon = 1e-5;
+    if (fabsf(rotationDegrees) <= epsilon) {
+        // HWC_TRANSFORM_NONE
+    } else if (fabsf(rotationDegrees - 90.0f) <= epsilon) {
+        // HWC_TRANSFORM_ROT_90
+        texCoordTranslateY = 1.0f;
+    } else if (fabsf(rotationDegrees - 180.0f) <= epsilon) {
+        // HWC_TRANSFORM_ROT_180
+        texCoordTranslateX = 1.0f;
+        texCoordTranslateY = 1.0f;
+    } else if (fabsf(rotationDegrees - 270.0f) <= epsilon) {
+        // HWC_TRANSFORM_ROT_270
+        texCoordTranslateX = 1.0f;
+    } else {
+        GFXSTREAM_WARNING("Unsupported rotation value: %.3f", rotationDegrees);
+    }
+
     const float pi = glm::pi<float>();
     UniformBufferBinding uboContents = {
         .positionTransform = glm::mat4(1.0f),
-        .texCoordTransform =
-            ((rotationDegrees == 0) ? glm::mat4(1.0f)
-                                    : (glm::rotate(glm::mat4(1.0f), (pi * rotationDegrees) / 180.0f,
-                                                   glm::vec3(0.0f, 0.0f, -1.0f)))),
+        .texCoordTransform = glm::translate(glm::mat4(1.0f), glm::vec3(texCoordTranslateX,
+                                                                       texCoordTranslateY, 0.0f)) *
+                             glm::rotate(glm::mat4(1.0f), (rotationDegrees * pi) / 180.0f,
+                                         glm::vec3(0.0f, 0.0f, -1.0f)),
         .colorTransform = glm::mat4(1.0f),
         .mode = glm::uvec4(static_cast<uint32_t>(HWC2_COMPOSITION_DEVICE), 1.0f, 0, 0),
         .alpha = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
     };
+    if (colorTransform.has_value()) {
+        const std::array<float, 16>& matrix = colorTransform.value();
+        uboContents.colorTransform = glm::mat4(matrix[0], matrix[1], matrix[2], matrix[3],    //
+                                               matrix[4], matrix[5], matrix[6], matrix[7],    //
+                                               matrix[8], matrix[9], matrix[10], matrix[11],  //
+                                               matrix[12], matrix[13], matrix[14], matrix[15]);
+    }
 
     {
         memcpy(uboStorage, &uboContents, sizeof(UniformBufferBinding));
