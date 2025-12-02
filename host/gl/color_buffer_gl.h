@@ -21,18 +21,20 @@
 #include <GLES/gl.h>
 #include <GLES3/gl3.h>
 
+#include <array>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "context_helper.h"
+#include "gfxstream/ManagedDescriptor.h"
+#include "gfxstream/host/borrowed_image.h"
+#include "gfxstream/host/features.h"
+#include "gfxstream/host/gfxstream_format.h"
 #include "handle.h"
 #include "hwc2.h"
 #include "pixel_read_formats.h"
-#include "gfxstream/ManagedDescriptor.h"
-#include "gfxstream/host/features.h"
-#include "gfxstream/host/borrowed_image.h"
-#include "gfxstream/host/gfxstream_format.h"
 #include "render-utils/Renderer.h"
 #include "render-utils/stream.h"
 
@@ -115,8 +117,8 @@ class ColorBufferGl {
     // Read the ColorBuffer instance's pixel values by first scaling
     // to the size of width x height, then clipping a |rect| from the
     // screen defined by width x height.
-    bool readPixelsScaled(int width, int height, int skinRotation,
-                          Rect rect, GfxstreamFormat pixelsFormat, void* pixels);
+    bool readPixelsScaled(int width, int height, int skinRotation, const Rect& rect,
+                          GfxstreamFormat pixelsFormat, void* pixels);
 
     // Read cached YUV pixel values into host memory.
     bool readPixelsYUVCached(int x,
@@ -156,12 +158,16 @@ class ColorBufferGl {
     // Post this ColorBuffer to the host native sub-window.
     // |rotation| is the rotation angle in degrees, clockwise in the GL
     // coordinate space.
-    bool post(GLuint tex, float rotation, float dx, float dy, const float* colorTransform);
+    // |colorTransform| is the layer's color transform matrix, null if identity.
+    bool post(GLuint tex, float rotation, float dx, float dy,
+              const std::optional<std::array<float, 16>>& colorTransform);
     // Post this ColorBufferGl to the host native sub-window and apply
     // the device screen overlay (if there is one).
     // |rotation| is the rotation angle in degrees, clockwise in the GL
     // coordinate space.
-    bool postViewportScaledWithOverlay(float rotation, float dx, float dy, const float* colorTransform);
+    // |colorTransform| is the layer's color transform matrix, null if identity.
+    bool postViewportScaledWithOverlay(float rotation, float dx, float dy,
+                                       const std::optional<std::array<float, 16>>& colorTransform);
 
     // Bind the current context's EGL_TEXTURE_2D texture to this ColorBufferGl's
     // EGLImage. This is intended to implement glEGLImageTargetTexture2DOES()
