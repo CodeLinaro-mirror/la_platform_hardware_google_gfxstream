@@ -22,10 +22,10 @@
 #include <memory>
 
 #include "gfxstream/AlignedBuf.h"
-#include "gfxstream/host/AstcCpuDecompressor.h"
+#include "gfxstream/host/astc_cpu_decompressor.h"
 
 using gfxstream::AlignedBuf;
-using gfxstream::vk::AstcCpuDecompressor;
+using gfxstream::host::vk::AstcCpuDecompressor;
 
 #define GL_R16 0x822A
 #define GL_RG16 0x822C
