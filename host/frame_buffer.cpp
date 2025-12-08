@@ -68,7 +68,6 @@ namespace {
 
 using gfxstream::Stream;
 using gfxstream::base::AutoLock;
-using gfxstream::base::SharedLibrary;
 using gfxstream::base::WorkerProcessingResult;
 using gfxstream::host::gl::GLESApi;
 using gfxstream::host::gl::GLESApi_2;
@@ -302,6 +301,33 @@ std::optional<GfxstreamFormat> GetGfxstreamFormat(
         default:
             return std::nullopt;
     }
+}
+
+static std::optional<std::array<float, 16>> GetColorTransform(uint32_t displayId = 0) {
+    float displayColorTransformData[16];
+    if (get_gfxstream_multi_display_operations().get_color_transform_matrix(
+            displayId, displayColorTransformData)) {
+        return std::nullopt;
+    }
+
+    // Only set it if not identity to allow faster codepaths
+    bool isIdentity = true;
+    const float eps = 1e-6f;
+    for(int i = 0; i < 16; i++) {
+        const float expected = (i % 5 == 0) ? 1.0f : 0.0f;
+        if (std::abs(displayColorTransformData[i] - expected) > eps) {
+            isIdentity = false;
+            break;
+        }
+    }
+    if (isIdentity) {
+        return std::nullopt;
+    }
+
+    std::array<float, 16> matrix;
+    std::copy(std::begin(displayColorTransformData), std::end(displayColorTransformData),
+                std::begin(matrix));
+    return matrix;
 }
 
 }  // namespace
@@ -1475,7 +1501,7 @@ WorkerProcessingResult FrameBuffer::Impl::postWorkerFunc(Post& post) {
                             },
                             "Wait for post");
                     });
-            m_postWorker->post(post.cb, std::move(postCallback));
+            m_postWorker->post(post.cb, std::move(postCallback), post.colorTransform);
             decColorBufferRefCountNoDestroy(post.cbHandle);
             break;
         }
@@ -1517,7 +1543,8 @@ WorkerProcessingResult FrameBuffer::Impl::postWorkerFunc(Post& post) {
                     post.screenshot.screenheight,
                     post.screenshot.rotation,
                     post.screenshot.pixelsFormat,
-                    post.screenshot.pixels, post.screenshot.rect);
+                    post.screenshot.pixels, post.screenshot.rect,
+                    post.colorTransform);
             decColorBufferRefCountNoDestroy(post.cbHandle);
             break;
         case PostCmd::Block:
@@ -1553,7 +1580,8 @@ std::future<void> FrameBuffer::Impl::sendPostWorkerCmd(Post post) {
         post.cb->readToBytesScaled(post.screenshot.screenwidth, post.screenshot.screenheight,
                                    post.screenshot.rotation, post.screenshot.rect,
                                    post.screenshot.pixelsFormat,
-                                   post.screenshot.pixels);
+                                   post.screenshot.pixels,
+                                   post.colorTransform);
     } else {
         std::future<void> completeFuture =
             m_postThread.enqueue(Post(std::move(post)));
@@ -2528,6 +2556,7 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
         postCmd.cmd = PostCmd::Post;
         postCmd.cb = colorBuffer.get();
         postCmd.cbHandle = p_colorbuffer;
+        postCmd.colorTransform = GetColorTransform();
         postCmd.completionCallback = std::make_unique<Post::CompletionCallback>(callback);
         sendPostWorkerCmd(std::move(postCmd));
         ret = AsyncResult::OK_AND_CALLBACK_SCHEDULED;
@@ -2838,6 +2867,7 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
     scrCmd.screenshot.pixelsFormat = format;
     scrCmd.screenshot.pixels = pixels;
     scrCmd.screenshot.rect = rect;
+    scrCmd.colorTransform = GetColorTransform();
 
     std::future<void> completeFuture = sendPostWorkerCmd(std::move(scrCmd));
 
@@ -4032,34 +4062,35 @@ void FrameBuffer::Impl::createEmulatedEglFenceSync(EGLenum type, int destroyWhen
         *outSyncThread = reinterpret_cast<uint64_t>(SyncThread::get());
     }
 
-    if (!m_emulationGl) {
-        // Avoid spamming the logs
-        // TODO(b/442393728): avoid calls to this function in GuestAngle mode
-        static bool logged_once = false;
-        if (!logged_once) {
-            GFXSTREAM_WARNING("%s is called in vulkan-only mode.", __PRETTY_FUNCTION__);
-            logged_once = true;
+    if (m_emulationGl) {
+        // TODO(b/233939967): move RenderThreadInfoGl usage to EmulationGl.
+        RenderThreadInfoGl* const info = RenderThreadInfoGl::get();
+        if (!info) {
+            GFXSTREAM_FATAL("RenderThreadGL not available.");
         }
-        return;
-    }
+        if (!info->currContext) {
+            uint32_t syncContext;
+            uint32_t syncSurface;
+            createTrivialContext(0,  // There is no context to share.
+                                &syncContext, &syncSurface);
+            bindContext(syncContext, syncSurface, syncSurface);
+            // This context is then cleaned up when the render thread exits.
+        }
 
-    // TODO(b/233939967): move RenderThreadInfoGl usage to EmulationGl.
-    RenderThreadInfoGl* const info = RenderThreadInfoGl::get();
-    if (!info) {
-        GFXSTREAM_FATAL("RenderThreadGL not available.");
+        auto sync = m_emulationGl->createEmulatedEglFenceSync(type, destroyWhenSignaled);
+        if (sync && outSync) {
+            *outSync = (uint64_t)(uintptr_t)sync.release();
+        }
     }
-    if (!info->currContext) {
-        uint32_t syncContext;
-        uint32_t syncSurface;
-        createTrivialContext(0,  // There is no context to share.
-                             &syncContext, &syncSurface);
-        bindContext(syncContext, syncSurface, syncSurface);
-        // This context is then cleaned up when the render thread exits.
+    else if (m_emulationVk) {
+        // No-op: compose operations using this callback will be waited on the futures
+        // generated before processing later rc commands. This ensures CPU and GPU
+        // synchronization is established for non-async compose scenarios, where this
+        // codepath is used via HostFrameComposer on non-virtiogpu/minigbm images.
+        // Egl fences are not used on newer images with virtiogpu/minigbm.
     }
-
-    auto sync = m_emulationGl->createEmulatedEglFenceSync(type, destroyWhenSignaled);
-    if (sync && outSync) {
-        *outSync = (uint64_t)(uintptr_t)sync.release();
+    else {
+        GFXSTREAM_FATAL("Unimplemented");
     }
 }
 

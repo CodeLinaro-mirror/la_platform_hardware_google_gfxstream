@@ -14,13 +14,16 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include "handle.h"
+#include "gfxstream/host/display_operations.h"
 #include "gfxstream/host/gfxstream_format.h"
+#include "handle.h"
 #include "render-utils/Renderer.h"
 
 namespace gfxstream {
@@ -54,6 +57,9 @@ struct Post {
     std::unique_ptr<CompletionCallback> completionCallback = nullptr;
     std::unique_ptr<Block> block = nullptr;
     HandleType cbHandle = 0;
+    std::optional<std::array<float, 16>> colorTransform;
+
+    //TODO: remove union here and separate into message structures
     union {
         ColorBuffer* cb;
         struct {
