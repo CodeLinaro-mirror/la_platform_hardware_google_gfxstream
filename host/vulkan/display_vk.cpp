@@ -19,6 +19,7 @@
 #include <glm/gtx/matrix_transform_2d.hpp>
 
 #include "gfxstream/common/logging.h"
+#include "gfxstream/system/System.h"
 #include "vulkan/vk_format_utils.h"
 #include "vulkan/vk_enum_string_helper.h"
 
@@ -53,19 +54,20 @@ bool shouldRecreateSwapchain(VkResult result) {
 
 }  // namespace
 
-DisplayVk::DisplayVk(const VulkanDispatch& vk, VkPhysicalDevice vkPhysicalDevice,
-                     uint32_t swapChainQueueFamilyIndex, uint32_t compositorQueueFamilyIndex,
-                     VkDevice vkDevice, VkQueue compositorVkQueue,
+DisplayVk::DisplayVk(const VulkanDispatch& vk, VkPhysicalDevice vkPhysicalDevice, VkDevice vkDevice,
+                     CompositorVk* compositorVk,
+                     uint32_t compositorQueueFamilyIndex, VkQueue compositorVkQueue,
                      std::shared_ptr<gfxstream::base::Lock> compositorVkQueueLock,
-                     VkQueue swapChainVkqueue,
+                     uint32_t swapChainQueueFamilyIndex, VkQueue swapChainVkqueue,
                      std::shared_ptr<gfxstream::base::Lock> swapChainVkQueueLock)
     : m_vk(vk),
       m_vkPhysicalDevice(vkPhysicalDevice),
-      m_swapChainQueueFamilyIndex(swapChainQueueFamilyIndex),
-      m_compositorQueueFamilyIndex(compositorQueueFamilyIndex),
       m_vkDevice(vkDevice),
+      m_compositorVk(compositorVk),
+      m_compositorQueueFamilyIndex(compositorQueueFamilyIndex),
       m_compositorVkQueue(compositorVkQueue),
       m_compositorVkQueueLock(compositorVkQueueLock),
+      m_swapChainQueueFamilyIndex(swapChainQueueFamilyIndex),
       m_swapChainVkQueue(swapChainVkqueue),
       m_swapChainVkQueueLock(swapChainVkQueueLock),
       m_vkCommandPool(VK_NULL_HANDLE),
@@ -99,6 +101,7 @@ void DisplayVk::drainQueues() {
     // We don't assume all VkCommandBuffer submitted to m_compositorVkQueueLock is always followed
     // by another operation on the m_swapChainVkQueue. Therefore, only waiting for the
     // m_swapChainVkQueue is not enough to guarantee all resources used are free to be destroyed.
+    if (m_swapChainVkQueue != m_compositorVkQueue)
     {
         gfxstream::base::AutoLock lock(*m_compositorVkQueueLock);
         VK_CHECK(vk_util::waitForVkQueueIdleWithRetry(m_vk, m_compositorVkQueue));
@@ -172,7 +175,7 @@ bool DisplayVk::recreateSwapchain() {
     return true;
 }
 
-DisplayVk::PostResult DisplayVk::post(const BorrowedImageInfo* sourceImageInfo) {
+DisplayVk::PostResult DisplayVk::post(const BorrowedImageInfo* sourceImageInfo, float rotationDegrees) {
     auto completedFuture = std::async(std::launch::deferred, [] {}).share();
     completedFuture.wait();
 
@@ -204,14 +207,14 @@ DisplayVk::PostResult DisplayVk::post(const BorrowedImageInfo* sourceImageInfo) 
         GFXSTREAM_INFO("Recreating swapchain completed.");
     }
 
-    auto result = postImpl(sourceImageInfo);
+    auto result = postImpl(sourceImageInfo, rotationDegrees);
     if (!result.success) {
         m_needToRecreateSwapChain = true;
     }
     return result;
 }
 
-DisplayVk::PostResult DisplayVk::postImpl(const BorrowedImageInfo* sourceImageInfo) {
+DisplayVk::PostResult DisplayVk::postImpl(const BorrowedImageInfo* sourceImageInfo, float rotationDegrees) {
     auto completedFuture = std::async(std::launch::deferred, [] {}).share();
     completedFuture.wait();
 
@@ -416,98 +419,167 @@ DisplayVk::PostResult DisplayVk::postImpl(const BorrowedImageInfo* sourceImageIn
     };
     VK_CHECK(m_vk.vkBeginCommandBuffer(cmdBuff, &beginInfo));
 
-    VkImageMemoryBarrier acquireSwapchainImageBarrier = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .pNext = nullptr,
-        .srcAccessMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
-        .dstAccessMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = m_swapChainStateVk->getVkImages()[imageIndex],
-        .subresourceRange =
-            {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
+    VkImageLayout currentSwapchainLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkAccessFlags curSrcAccessMask = VK_ACCESS_NONE;
+    VkImage currentSwapchainImage = m_swapChainStateVk->getVkImages()[imageIndex];
+    VkRenderPass currentSwapchainRenderpass = m_swapChainStateVk->getVkRenderPasses()[imageIndex];
+    VkFramebuffer currentSwapchainFramebuffer = m_swapChainStateVk->getVkFramebuffers()[imageIndex];
+    const VkImageSubresourceRange subresourceRange = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
     };
-    m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                              &acquireSwapchainImageBarrier);
 
     // Note: The extent used during swapchain creation must be used here and not the
     // current surface's extent as the swapchain may not have been updated after the
     // surface resized. The blit must not try to write outside of the extent of the
     // existing swapchain images.
     const VkExtent2D swapchainImageExtent = m_swapChainStateVk->getImageExtent();
-    const VkImageBlit region = {
-        .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                           .mipLevel = 0,
-                           .baseArrayLayer = 0,
-                           .layerCount = 1},
-        .srcOffsets = {{0, 0, 0},
-                       {static_cast<int32_t>(sourceImageInfoVk->imageCreateInfo.extent.width),
-                        static_cast<int32_t>(sourceImageInfoVk->imageCreateInfo.extent.height), 1}},
-        .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                           .mipLevel = 0,
-                           .baseArrayLayer = 0,
-                           .layerCount = 1},
-        .dstOffsets = {{0, 0, 0},
-                       {static_cast<int32_t>(swapchainImageExtent.width),
-                        static_cast<int32_t>(swapchainImageExtent.height), 1}},
-    };
-    VkFormat displayBufferFormat = sourceImageInfoVk->imageCreateInfo.format;
-    VkImageTiling displayBufferTiling = sourceImageInfoVk->imageCreateInfo.tiling;
-    VkFilter filter = VK_FILTER_NEAREST;
-    VkFormatFeatureFlags displayBufferFormatFeatures =
-        getFormatFeatures(displayBufferFormat, displayBufferTiling);
-    if (formatIsDepthOrStencil(displayBufferFormat)) {
-        ERR_ONCE(
-            "The format of the display buffer, %s, is a depth/stencil format, we can only use the "
-            "VK_FILTER_NEAREST filter according to VUID-vkCmdBlitImage-srcImage-00232.",
-            string_VkFormat(displayBufferFormat));
-        filter = VK_FILTER_NEAREST;
-    } else if (!(displayBufferFormatFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
-        ERR_ONCE(
-            "The format of the display buffer, %s, with the tiling, %s, doesn't support "
-            "VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT, so we can only use the "
-            "VK_FILTER_NEAREST filter according VUID-vkCmdBlitImage-filter-02001. The supported "
-            "features are %s.",
-            string_VkFormat(displayBufferFormat), string_VkImageTiling(displayBufferTiling),
-            string_VkFormatFeatureFlags(displayBufferFormatFeatures).c_str());
-        filter = VK_FILTER_NEAREST;
+
+    CompositorVkBase::ImmediateModeResources* imResources =
+        m_compositorVk ? m_compositorVk->acquireImmediateModeResources() : nullptr;
+    const bool useBlit = !imResources || (rotationDegrees == 0);
+
+    if (useBlit) {
+        // Use vkCmdBlitImage to post the image
+        VkImageMemoryBarrier acquireSwapchainImageBarrier = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = curSrcAccessMask,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = currentSwapchainLayout,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = currentSwapchainImage,
+            .subresourceRange = subresourceRange,
+        };
+        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                  &acquireSwapchainImageBarrier);
+        currentSwapchainLayout = acquireSwapchainImageBarrier.newLayout;
+        curSrcAccessMask = acquireSwapchainImageBarrier.dstAccessMask;
+
+        const VkImageBlit region = {
+            .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .mipLevel = 0,
+                               .baseArrayLayer = 0,
+                               .layerCount = 1},
+            .srcOffsets = {{0, 0, 0},
+                           {static_cast<int32_t>(sourceImageInfoVk->imageCreateInfo.extent.width),
+                            static_cast<int32_t>(sourceImageInfoVk->imageCreateInfo.extent.height),
+                            1}},
+            .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .mipLevel = 0,
+                               .baseArrayLayer = 0,
+                               .layerCount = 1},
+            .dstOffsets = {{0, 0, 0},
+                           {static_cast<int32_t>(swapchainImageExtent.width),
+                            static_cast<int32_t>(swapchainImageExtent.height), 1}},
+        };
+        VkFormat displayBufferFormat = sourceImageInfoVk->imageCreateInfo.format;
+        VkImageTiling displayBufferTiling = sourceImageInfoVk->imageCreateInfo.tiling;
+
+        VkFilter filter = VK_FILTER_NEAREST;
+        VkFormatFeatureFlags displayBufferFormatFeatures =
+            getFormatFeatures(displayBufferFormat, displayBufferTiling);
+        if (formatIsDepthOrStencil(displayBufferFormat)) {
+            ERR_ONCE(
+                "The format of the display buffer, %s, is a depth/stencil format, we can only use "
+                "the VK_FILTER_NEAREST filter according to VUID-vkCmdBlitImage-srcImage-00232.",
+                string_VkFormat(displayBufferFormat));
+            filter = VK_FILTER_NEAREST;
+        } else if (!(displayBufferFormatFeatures &
+                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+            ERR_ONCE(
+                "The format of the display buffer, %s, with the tiling, %s, doesn't support "
+                "VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT, so we can only use the "
+                "VK_FILTER_NEAREST filter according VUID-vkCmdBlitImage-filter-02001. The "
+                "supported features are %s.",
+                string_VkFormat(displayBufferFormat), string_VkImageTiling(displayBufferTiling),
+                string_VkFormatFeatureFlags(displayBufferFormatFeatures).c_str());
+            filter = VK_FILTER_NEAREST;
+        } else {
+            filter = VK_FILTER_LINEAR;
+        }
+        m_vk.vkCmdBlitImage(cmdBuff, sourceImageInfoVk->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            currentSwapchainImage, currentSwapchainLayout, 1, &region, filter);
     } else {
-        filter = VK_FILTER_LINEAR;
+        // Use immediate drawImage call to render the image
+        VkImageMemoryBarrier transitionSwapchainToAttachmentBarrier = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = curSrcAccessMask,
+            .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .oldLayout = currentSwapchainLayout,
+            .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = currentSwapchainImage,
+            .subresourceRange = subresourceRange,
+        };
+        m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
+                                  nullptr, 1, &transitionSwapchainToAttachmentBarrier);
+        currentSwapchainLayout = transitionSwapchainToAttachmentBarrier.newLayout;
+        curSrcAccessMask = transitionSwapchainToAttachmentBarrier.dstAccessMask;
+
+        m_compositorVk->drawImage(cmdBuff, m_swapChainStateVk->getFormat(),
+                                  swapchainImageExtent.width, swapchainImageExtent.height,
+                                  currentSwapchainRenderpass, currentSwapchainFramebuffer,
+                                  imResources, sourceImageInfoVk->imageView, rotationDegrees);
     }
-    m_vk.vkCmdBlitImage(cmdBuff, sourceImageInfoVk->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                        m_swapChainStateVk->getVkImages()[imageIndex],
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter);
+
+    // Render screen mask overlay
+    if (imResources && m_compositorVk->hasScreenMask()) {
+        if (useBlit) {
+            VkImageMemoryBarrier transitionSwapchainToAttachmentBarrier = {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .srcAccessMask = curSrcAccessMask,
+                .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .oldLayout = currentSwapchainLayout,
+                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = currentSwapchainImage,
+                .subresourceRange = subresourceRange,
+            };
+            m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr,
+                                      0, nullptr, 1, &transitionSwapchainToAttachmentBarrier);
+            currentSwapchainLayout = transitionSwapchainToAttachmentBarrier.newLayout;
+            curSrcAccessMask = transitionSwapchainToAttachmentBarrier.dstAccessMask;
+        }
+
+        m_compositorVk->drawScreenMask(cmdBuff, m_swapChainStateVk->getFormat(),
+                                       swapchainImageExtent.width, swapchainImageExtent.height,
+                                       currentSwapchainRenderpass, currentSwapchainFramebuffer,
+                                       imResources, rotationDegrees);
+    }
 
     VkImageMemoryBarrier releaseSwapchainImageBarrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .srcAccessMask = curSrcAccessMask,
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .oldLayout = currentSwapchainLayout,
         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = m_swapChainStateVk->getVkImages()[imageIndex],
-        .subresourceRange =
-            {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
+        .image = currentSwapchainImage,
+        .subresourceRange = subresourceRange,
     };
-    m_vk.vkCmdPipelineBarrier(cmdBuff, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+
+    VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (currentSwapchainLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    }
+
+    m_vk.vkCmdPipelineBarrier(cmdBuff, srcStageMask, dstStageMask, 0, 0, nullptr, 0, nullptr, 1,
                               &releaseSwapchainImageBarrier);
+    currentSwapchainLayout = releaseSwapchainImageBarrier.newLayout;
+    curSrcAccessMask = releaseSwapchainImageBarrier.dstAccessMask;
 
     VK_CHECK(m_vk.vkEndCommandBuffer(cmdBuff));
 
@@ -528,18 +600,21 @@ DisplayVk::PostResult DisplayVk::postImpl(const BorrowedImageInfo* sourceImageIn
         VK_CHECK(m_vk.vkQueueSubmit(m_compositorVkQueue, 1, &submitInfo, postCompleteFence));
     }
     std::shared_future<std::shared_ptr<PostResource>> postResourceFuture =
-        std::async(std::launch::deferred, [postCompleteFence, postResource, this]() mutable {
+        std::async(std::launch::deferred, [postCompleteFence, postResource, this,
+                                           imResources]() mutable {
             VkResult res = m_vk.vkWaitForFences(m_vkDevice, 1, &postCompleteFence, VK_TRUE,
                                                 kVkWaitForFencesTimeoutNsecs);
-            if (res == VK_SUCCESS) {
-                return postResource;
-            }
             if (res == VK_TIMEOUT) {
                 // Retry. If device lost, hopefully this returns immediately.
                 res = m_vk.vkWaitForFences(m_vkDevice, 1, &postCompleteFence, VK_TRUE,
                                            kVkWaitForFencesTimeoutNsecs);
             }
             VK_CHECK(res);
+
+            // This should always be waited even in failure
+            if (imResources) {
+                m_compositorVk->releaseImmediateModeResources(imResources);
+            }
             return postResource;
         }).share();
     m_postResourceFutures[imageIndex] = postResourceFuture;

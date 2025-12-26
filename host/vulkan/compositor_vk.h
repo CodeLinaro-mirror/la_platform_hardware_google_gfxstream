@@ -47,6 +47,7 @@ namespace vk {
 // If we see rendering error or significant time spent on updating
 // descriptors in setComposition, we should tune this number.
 static constexpr const uint32_t kMaxLayersPerFrame = 48;
+static constexpr const uint32_t kMaxImmediateDrawsPerFrame = 16;
 static const uint64_t kVkWaitForFencesTimeoutNsecs = 5ULL * 1000ULL * 1000ULL * 1000ULL;
 
 // Base used to grant visibility to members to the vk_util::* helper classes.
@@ -100,18 +101,27 @@ struct CompositorVkBase : public vk_util::MultiCrtp<CompositorVkBase,         //
 
     // Unused image that is solely used to occupy the sampled image binding
     // when compositing a solid color layer.
-    struct DefaultImage {
+    struct Image {
         VkImage m_vkImage = VK_NULL_HANDLE;
         VkImageView m_vkImageView = VK_NULL_HANDLE;
         VkDeviceMemory m_vkImageMemory = VK_NULL_HANDLE;
-    } m_defaultImage;
+    };
+
+    Image m_defaultImage;
+
+    std::mutex mScreenMaskMutex;
+    Image m_screenMaskImage;
 
     // The underlying storage for all of the uniform buffer objects.
     struct UniformBufferStorage {
         VkBuffer m_vkBuffer = VK_NULL_HANDLE;
         VkDeviceMemory m_vkDeviceMemory = VK_NULL_HANDLE;
         VkDeviceSize m_stride = 0;
-    } m_uniformStorage;
+        VkDeviceSize m_size = 0;
+        void* m_mappedPtr = nullptr;
+    };
+
+    UniformBufferStorage m_uniformStorage;
 
     // Keep in sync with vulkan/Compositor.frag.
     struct SamplerBinding {
@@ -162,6 +172,26 @@ struct CompositorVkBase : public vk_util::MultiCrtp<CompositorVkBase,         //
     std::vector<PerFrameResources> m_frameResources;
     std::deque<std::shared_future<PerFrameResources*>> m_availableFrameResources;
 
+    // Immediate mode rendering resources for post draw operations
+    struct ImmediateModeResources {
+        std::vector<VkDescriptorSet> m_descriptorSets;
+        std::vector<UniformBufferBinding*> m_uboStorages;
+        uint32_t m_curDataIndex = 0;
+
+        //TODO: implement a better 'available' list tracking
+        std::mutex m_isFreeMutex;
+        bool m_isFree = true;
+
+        void init() {
+            m_curDataIndex = 0;
+            m_isFree = false;
+        }
+        void reset() {
+            m_isFree = true;
+        }
+    };
+    std::vector<ImmediateModeResources> m_immediateFrameResources;
+
     explicit CompositorVkBase(const VulkanDispatch& vk, VkDevice device,
                               VkPhysicalDevice physicalDevice, VkQueue queue,
                               std::shared_ptr<gfxstream::base::Lock> queueLock,
@@ -182,7 +212,8 @@ struct CompositorVkBase : public vk_util::MultiCrtp<CompositorVkBase,         //
           m_vkDescriptorPool(VK_NULL_HANDLE),
           m_vkCommandPool(VK_NULL_HANDLE),
           m_defaultSampler(VK_NULL_HANDLE),
-          m_frameResources(maxFramesInFlight) {}
+          m_frameResources(maxFramesInFlight),
+          m_immediateFrameResources(maxFramesInFlight) {}
 };
 
 class CompositorVk : protected CompositorVkBase, public Compositor {
@@ -197,11 +228,32 @@ class CompositorVk : protected CompositorVkBase, public Compositor {
 
     CompositionFinishedWaitable compose(const CompositionRequest& compositionRequest) override;
 
+    void setScreenMask(int width, int height, const uint8_t* rgbaData) override;
+
     void onImageDestroyed(uint32_t imageId) override;
 
     static bool queueSupportsComposition(const VkQueueFamilyProperties& properties) {
         return properties.queueFlags & VK_QUEUE_GRAPHICS_BIT;
     }
+
+    // Check if a screen mask image has been set for the final composition
+    bool hasScreenMask() const { return (m_screenMaskImage.m_vkImage != VK_NULL_HANDLE); }
+
+    VkImageView getScreenMaskView() const {
+        return m_screenMaskImage.m_vkImageView;
+    }
+
+    void drawScreenMask(VkCommandBuffer commandBuffer, VkFormat targetFormat, uint32_t targetWidth,
+                        uint32_t targetHeight, VkRenderPass targetRenderPass,
+                        VkFramebuffer targetFramebuffer, ImmediateModeResources* frameResources,
+                        float rotationDegrees);
+    void drawImage(VkCommandBuffer commandBuffer, VkFormat targetFormat, uint32_t targetWidth,
+                   uint32_t targetHeight, VkRenderPass targetRenderPass,
+                   VkFramebuffer targetFramebuffer, ImmediateModeResources* frameResources,
+                   VkImageView imageView, float rotationDegrees);
+
+    ImmediateModeResources* acquireImmediateModeResources();
+    void releaseImmediateModeResources(ImmediateModeResources* frameResources);
 
    private:
     explicit CompositorVk(const VulkanDispatch&, VkDevice, VkPhysicalDevice, VkQueue,
@@ -221,7 +273,15 @@ class CompositorVk : protected CompositorVkBase, public Compositor {
     void setUpCommandPool();
     void setUpFences();
     void setUpDefaultImage();
+    void setUpScreenMaskImage(uint32_t width, uint32_t height, const uint8_t* rgbaData);
     void setUpFrameResourceFutures();
+
+    Image createImage(uint32_t width, uint32_t height, const uint8_t* rgbaData,
+                      const std::string& debugName);
+    void destroyImage(Image& img);
+
+    void createUniformBufferStorage(UniformBufferStorage& storage, uint32_t numBuffersRequired);
+    void destroyUniformBufferStorage(UniformBufferStorage& storage);
 
     std::optional<std::tuple<VkBuffer, VkDeviceMemory>> createBuffer(VkDeviceSize,
                                                                      VkBufferUsageFlags,

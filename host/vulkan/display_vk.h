@@ -42,13 +42,14 @@ namespace vk {
 
 class DisplayVk : public Display {
    public:
-    DisplayVk(const VulkanDispatch&, VkPhysicalDevice, uint32_t swapChainQueueFamilyIndex,
-              uint32_t compositorQueueFamilyIndex, VkDevice, VkQueue compositorVkQueue,
-              std::shared_ptr<gfxstream::base::Lock> compositorVkQueueLock, VkQueue swapChainVkQueue,
+    DisplayVk(const VulkanDispatch&, VkPhysicalDevice, VkDevice, CompositorVk* compositorVk,
+              uint32_t compositorQueueFamilyIndex, VkQueue compositorVkQueue,
+              std::shared_ptr<gfxstream::base::Lock> compositorVkQueueLock,
+              uint32_t swapChainQueueFamilyIndex, VkQueue swapChainVkQueue,
               std::shared_ptr<gfxstream::base::Lock> swapChainVkQueueLock);
     ~DisplayVk();
 
-    PostResult post(const BorrowedImageInfo* info);
+    PostResult post(const BorrowedImageInfo* info, float rotationDegrees);
 
     void drainQueues();
     void clear();
@@ -67,18 +68,21 @@ class DisplayVk : public Display {
     // component of the returned result is a future that will complete when the GPU side of work
     // completes. The caller is responsible to guarantee the synchronization and the layout of
     // ColorBufferCompositionInfo::m_vkImage is VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL.
-    PostResult postImpl(const BorrowedImageInfo* info);
+    PostResult postImpl(const BorrowedImageInfo* info, float rotationDegrees);
 
     VkFormatFeatureFlags getFormatFeatures(VkFormat, VkImageTiling);
     bool canPost(const VkImageCreateInfo&);
 
     const VulkanDispatch& m_vk;
     VkPhysicalDevice m_vkPhysicalDevice;
-    uint32_t m_swapChainQueueFamilyIndex;
-    uint32_t m_compositorQueueFamilyIndex;
     VkDevice m_vkDevice;
+    CompositorVk* m_compositorVk;  // TODO(b/442394091): temporary addition, refactor compositor to
+                                   // separate drawing routines like TextureDraw in GL side
+
+    uint32_t m_compositorQueueFamilyIndex;
     VkQueue m_compositorVkQueue;
     std::shared_ptr<gfxstream::base::Lock> m_compositorVkQueueLock;
+    uint32_t m_swapChainQueueFamilyIndex;
     VkQueue m_swapChainVkQueue;
     std::shared_ptr<gfxstream::base::Lock> m_swapChainVkQueueLock;
     VkCommandPool m_vkCommandPool;

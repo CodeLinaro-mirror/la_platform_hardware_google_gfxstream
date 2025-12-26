@@ -14,7 +14,7 @@
 
 #include "vulkan_dispatch.h"
 
-#include "gfxstream/SharedLibrary.h"
+#include "gfxstream/shared_library.h"
 #include "gfxstream/files/PathUtils.h"
 #include "gfxstream/synchronization/Lock.h"
 #include "gfxstream/system/System.h"
@@ -92,7 +92,7 @@ static void initIcdPaths(bool forTesting) {
     }
 
     if (forTesting) {
-        const char* testingICD = "swiftshader";
+        const char* testingICD = "lavapipe";
         GFXSTREAM_INFO("%s: In test environment, enforcing %s ICD.", __func__, testingICD);
         gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", testingICD);
         androidIcd = testingICD;
@@ -141,14 +141,6 @@ static void initIcdPaths(bool forTesting) {
 
             // MVK_CONFIG_USE_MTLHEAP is required for VK_EXT_external_memory_metal
             gfxstream::base::setEnvironmentVariable("MVK_CONFIG_USE_MTLHEAP", "1");
-
-            // TODO(b/351765838): VVL won't work with MoltenVK due to the current
-            //  way of external memory handling, add it into disable list to
-            //  avoid users enabling it implicitly (i.e. via vkconfig).
-            //  It can be enabled with VK_LOADER_LAYERS_ALLOW=VK_LAYER_KHRONOS_validation
-            GFXSTREAM_INFO("Vulkan Validation Layers won't be enabled with MoltenVK");
-            gfxstream::base::setEnvironmentVariable("VK_LOADER_LAYERS_DISABLE",
-                                                    "VK_LAYER_KHRONOS_validation");
         }
 #else
         // By default, on other platforms, just use whatever the system

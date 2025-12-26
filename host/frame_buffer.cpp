@@ -35,7 +35,7 @@
 #include "host/gl/render_thread_info_gl.h"
 #include "host/gl/yuv_converter.h"
 #include "gl/gles2_dec/gles2_dec.h"
-#include "gl/glestranslator/EGL/EglGlobalInfo.h"
+#include "gl/glestranslator/egl/egl_global_info.h"
 #endif
 
 #include "host/gl/context_helper.h"
@@ -43,7 +43,7 @@
 #include "native_sub_window.h"
 #include "render_thread_info.h"
 #include "sync_thread.h"
-#include "gfxstream/SharedLibrary.h"
+#include "gfxstream/shared_library.h"
 #include "gfxstream/Tracing.h"
 #include "gfxstream/common/logging.h"
 #include "gfxstream/containers/Lookup.h"
@@ -984,14 +984,15 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
 #endif
         };
         impl->m_emulationVk = vk::VkEmulation::create(vkDispatch, callbacks, impl->m_features);
-        if (impl->m_emulationVk) {
-            vk::VkDecoderGlobalState::initialize(impl->m_emulationVk.get());
-        } else {
+        if (!impl->m_emulationVk) {
             GFXSTREAM_ERROR(
-                "Failed to initialize global Vulkan emulation. Disable the Vulkan support.");
+                "Failed to initialize global Vulkan emulation requested. Vulkan feature should be "
+                "disabled.");
+            return nullptr;
         }
-    }
-    if (impl->m_emulationVk) {
+
+        vk::VkDecoderGlobalState::initialize(impl->m_emulationVk.get());
+
         impl->m_vulkanEnabled = true;
         if (impl->m_features.VulkanNativeSwapchain.enabled) {
             impl->m_vkInstance = impl->m_emulationVk->getInstance();
@@ -1123,18 +1124,19 @@ std::unique_ptr<FrameBuffer::Impl> FrameBuffer::Impl::Create(FrameBuffer* frameb
     }
 
     if (impl->m_emulationVk && impl->m_useVulkanComposition) {
-        impl->m_compositor = impl->m_emulationVk->getCompositor();
-        if (!impl->m_compositor) {
-            GFXSTREAM_ERROR("Failed to get CompositorVk from VkEmulation.");
-            return nullptr;
-        }
         GFXSTREAM_DEBUG("Performing composition using CompositorVk.");
+        impl->m_compositor = impl->m_emulationVk->getCompositor();
     } else {
-        GFXSTREAM_DEBUG("Performing composition using CompositorGl.");
 #if GFXSTREAM_ENABLE_HOST_GLES
-        auto compositorGl = impl->m_emulationGl->getCompositor();
-        impl->m_compositor = compositorGl;
+        if (impl->m_emulationGl) {
+            GFXSTREAM_DEBUG("Performing composition using CompositorGl.");
+            impl->m_compositor = impl->m_emulationGl->getCompositor();
+        }
 #endif
+    }
+    if (!impl->m_compositor) {
+        GFXSTREAM_ERROR("Failed to initialize the compositor.");
+        return nullptr;
     }
 
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -2272,12 +2274,6 @@ bool FrameBuffer::Impl::getBufferInfo(HandleType p_buffer, int* size) {
 }
 
 bool FrameBuffer::Impl::post(HandleType p_colorbuffer, bool needLockAndBind) {
-#if GFXSTREAM_ENABLE_HOST_GLES
-    if (m_features.GuestVulkanOnly.enabled) {
-        flushColorBufferFromGl(p_colorbuffer);
-    }
-#endif
-
     auto res = postImplSync(p_colorbuffer, needLockAndBind);
     if (res) setGuestPostedAFrame();
     return res;
@@ -2285,12 +2281,6 @@ bool FrameBuffer::Impl::post(HandleType p_colorbuffer, bool needLockAndBind) {
 
 void FrameBuffer::Impl::postWithCallback(HandleType p_colorbuffer,
                                          Post::CompletionCallback callback, bool needLockAndBind) {
-#if GFXSTREAM_ENABLE_HOST_GLES
-    if (m_features.GuestVulkanOnly.enabled) {
-        flushColorBufferFromGl(p_colorbuffer);
-    }
-#endif
-
     AsyncResult res = postImpl(p_colorbuffer, callback, needLockAndBind);
     if (res.Succeeded()) {
         setGuestPostedAFrame();
@@ -3547,22 +3537,7 @@ HandleType FrameBuffer::Impl::getEmulatedEglWindowSurfaceColorBufferHandle(Handl
 }
 
 void FrameBuffer::Impl::setScreenMask(int width, int height, const uint8_t* rgbaData) {
-    if (m_useVulkanComposition) {
-        if (!m_emulationVk) {
-            GFXSTREAM_FATAL("%s:%d - VK emulation is not enabled.", __func__, __LINE__);
-            return;
-        }
-        if (rgbaData) {
-            // TODO(b/442394091): Screenmask image is not supported in vulkan composition
-            GFXSTREAM_ERROR("%s:%d - Screenmask image is not supported in vulkan composition.",
-                            __func__, __LINE__);
-            return;
-        }
-        return;
-    }
-
-    ENSURE_GL_EMULATION_VOID();
-    m_emulationGl->mTextureDraw->setScreenMask(width, height, rgbaData);
+    m_compositor->setScreenMask(width, height, rgbaData);
 }
 
 void FrameBuffer::Impl::setScreenBackground(int width, int height, const uint8_t* rgbaData) {
@@ -4371,7 +4346,17 @@ void FrameBuffer::Impl::createYUVTextures(uint32_t type, uint32_t count, int wid
                                           uint32_t* output) {
     FrameworkFormat format = static_cast<FrameworkFormat>(type);
     AutoLock mutex(m_lock);
-    RecursiveScopedContextBind bind(getPbufferSurfaceContextHelper());
+    auto contextHelper = getPbufferSurfaceContextHelper();
+    if (!contextHelper) {
+        // This should not be called in vulkan-only mode
+        GFXSTREAM_ERROR("%s: invalid pbuffer surface context", __func__);
+        return;
+    }
+    RecursiveScopedContextBind bind(contextHelper);
+    if (!bind.isOk()) {
+        GFXSTREAM_ERROR("%s: could not bind context helper", __func__);
+        return;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         if (format == FRAMEWORK_FORMAT_NV12) {
             YUVConverter::createYUVGLTex(GL_TEXTURE0, width, height, format, m_features.Yuv420888ToNv21.enabled,
@@ -4472,14 +4457,18 @@ void FrameBuffer::Impl::asyncWaitForGpuWithCb(uint64_t eglsync, FenceCompletionC
 }
 
 const gl::GLESv2Dispatch* FrameBuffer::Impl::getGles2Dispatch() {
-    ENSURE_GL_EMULATION_VALUE(nullptr);
-
+    if (!m_emulationGl) {
+        // This is ok, returned value should be checked
+        return nullptr;
+    }
     return m_emulationGl->getGles2Dispatch();
 }
 
 const gl::EGLDispatch* FrameBuffer::Impl::getEglDispatch() {
-    ENSURE_GL_EMULATION_VALUE(nullptr);
-
+    if (!m_emulationGl) {
+        // This is ok, returned value should be checked
+        return nullptr;
+    }
     return m_emulationGl->getEglDispatch();
 }
 
