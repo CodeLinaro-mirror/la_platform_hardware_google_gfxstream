@@ -19,7 +19,8 @@
 
 #include "gfxstream/host/borrowed_image.h"
 #include "gfxstream/host/external_object_manager.h"
-#include "host/framework_formats.h"
+#include "gfxstream/host/gfxstream_format.h"
+#include "render-utils/Renderer.h"
 #include "render-utils/stream.h"
 
 namespace gfxstream {
@@ -31,8 +32,8 @@ class VkEmulation;
 class ColorBufferVk {
    public:
     static std::unique_ptr<ColorBufferVk> create(VkEmulation& emulationVk, uint32_t handle,
-                                                 uint32_t width, uint32_t height, GLenum format,
-                                                 FrameworkFormat frameworkFormat, bool vulkanOnly,
+                                                 uint32_t width, uint32_t height,
+                                                 GfxstreamFormat format, bool vulkanOnly,
                                                  uint32_t memoryProperty,
                                                  gfxstream::Stream* stream,
                                                  uint32_t mipLevels);
@@ -42,6 +43,9 @@ class ColorBufferVk {
     bool readToBytes(std::vector<uint8_t>* outBytes);
     bool readToBytes(uint32_t x, uint32_t y, uint32_t w, uint32_t h, void* outBytes,
                      uint64_t outBytesSize);
+    bool readPixelsScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation, const Rect& rect,
+                          GfxstreamFormat pixelsFormat, void* outPixels,
+                          const std::optional<std::array<float, 16>>& colorTransform);
 
     bool updateFromBytes(const std::vector<uint8_t>& bytes);
     bool updateFromBytes(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const void* bytes);

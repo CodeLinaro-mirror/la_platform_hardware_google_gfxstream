@@ -14,15 +14,20 @@
 
 #pragma once
 
+#if GFXSTREAM_ENABLE_HOST_GLES
 #include <GLES3/gl3.h>
+#endif
 
+#include <array>
 #include <memory>
+#include <optional>
 
 #include "framework_formats.h"
-#include "handle.h"
-#include "hwc2.h"
 #include "gfxstream/host/borrowed_image.h"
 #include "gfxstream/host/external_object_manager.h"
+#include "gfxstream/host/gfxstream_format.h"
+#include "handle.h"
+#include "hwc2.h"
 #include "render-utils/Renderer.h"
 #include "render-utils/stream.h"
 #include "snapshot/LazySnapshotObj.h"
@@ -49,9 +54,11 @@ namespace host {
 class ColorBuffer : public LazySnapshotObj<ColorBuffer> {
    public:
     static std::shared_ptr<ColorBuffer> create(gl::EmulationGl* emulationGl,
-                                               vk::VkEmulation* emulationVk, uint32_t width,
-                                               uint32_t height, GLenum format,
-                                               FrameworkFormat frameworkFormat, HandleType handle,
+                                               vk::VkEmulation* emulationVk,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               GfxstreamFormat format,
+                                               HandleType handle,
                                                Stream* stream = nullptr);
 
     static std::shared_ptr<ColorBuffer> onLoad(gl::EmulationGl* emulationGl,
@@ -63,19 +70,22 @@ class ColorBuffer : public LazySnapshotObj<ColorBuffer> {
     HandleType getHndl() const;
     uint32_t getWidth() const;
     uint32_t getHeight() const;
-    GLenum getFormat() const;
-    FrameworkFormat getFrameworkFormat() const;
+    GfxstreamFormat getFormat() const;
 
-    void readToBytes(int x, int y, int width, int height, GLenum pixelsFormat, GLenum pixelsType,
+    void readToBytes(int x, int y, int width, int height,
+                     GfxstreamFormat pixelsFormat,
                      void* outPixels, uint64_t outPixelsSize);
-    void readToBytesScaled(int pixelsWidth, int pixelsHeight, GLenum pixelsFormat,
-                           GLenum pixelsType, int pixelsRotation, Rect rect, void* outPixels);
+    void readToBytesScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation, const Rect& rect,
+                           GfxstreamFormat pixelsFormat, void* outPixels,
+                           const std::optional<std::array<float, 16>>& colorTransform);
     void readYuvToBytes(int x, int y, int width, int height, void* outPixels, uint32_t outPixelsSize);
 
-    bool updateFromBytes(int x, int y, int width, int height, GLenum pixelsFormat,
-                         GLenum pixelsType, const void* pixels);
-    bool updateFromBytes(int x, int y, int width, int height, FrameworkFormat frameworkFormat,
-                         GLenum pixelsFormat, GLenum pixelsType, const void* pixels,
+    bool updateFromBytes(int x,
+                         int y,
+                         int width,
+                         int height,
+                         GfxstreamFormat pixelsFormat,
+                         const void* pixels,
                          void* metadata = nullptr);
     bool updateGlFromBytes(const void* bytes, std::size_t bytesSize);
 
@@ -103,13 +113,15 @@ class ColorBuffer : public LazySnapshotObj<ColorBuffer> {
     void glOpReadback(unsigned char* img, bool readbackBgra);
     void glOpReadbackAsync(GLuint buffer, bool readbackBgra);
     bool glOpImportEglNativePixmap(void* pixmap, bool preserveContent);
-    void glOpSwapYuvTexturesAndUpdate(GLenum format, GLenum type, FrameworkFormat frameworkFormat,
+    void glOpSwapYuvTexturesAndUpdate(GLenum format, GLenum type, GfxstreamFormat texturesFormat,
                                       GLuint* textures);
     bool glOpReadContents(size_t* outNumBytes, void* outContents);
     bool glOpIsFastBlitSupported() const;
-    void glOpPostLayer(const ComposeLayer& l, int frameWidth, int frameHeight);
-    void glOpPostViewportScaledWithOverlay(float rotation, float dx, float dy,
-                                           const float* colorTransform);
+    void glOpPostLayer(const ComposeLayer& l, int frameWidth, int frameHeight,
+        const std::optional<std::array<float, 16>>& colorTransform);
+    void glOpPostViewportScaledWithOverlay(
+        float rotation, float dx, float dy,
+        const std::optional<std::array<float, 16>>& colorTransform);
 #endif
 
    private:

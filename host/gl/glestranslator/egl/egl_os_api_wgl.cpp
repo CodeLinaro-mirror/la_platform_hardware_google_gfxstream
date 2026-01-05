@@ -61,7 +61,7 @@
 
 namespace {
 
-using gfxstream::base::SharedLibrary;
+using gfxstream::host::SharedLibrary;
 typedef GlLibrary::GlFunctionPointer GlFunctionPointer;
 
 // Returns true if an extension is include in a given extension list.
@@ -1305,11 +1305,6 @@ WinEngine::WinEngine() :
         mGlobals(&mBaseDispatch) {
     const char* kLibName = "opengl32.dll";
     bool isSystemLib = true;
-    const char* env = ::getenv("ANDROID_GL_LIB");
-    if (env && !strcmp(env, "mesa")) {
-        kLibName = "mesa_opengl32.dll";
-        isSystemLib = false;
-    }
     char error[256];
     GFXSTREAM_DEBUG("%s: Trying to load %s\n", __FUNCTION__, kLibName);
     mLib = SharedLibrary::open(kLibName, error, sizeof(error));

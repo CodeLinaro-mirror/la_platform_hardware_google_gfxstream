@@ -78,25 +78,37 @@ static void setIcdPaths(const std::string& icdFilename) {
 
 static void initIcdPaths(bool forTesting) {
     auto androidIcd = gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD");
-    if (androidIcd == "") {
+
+    if (forTesting) {
+#if defined(__APPLE__) && !defined(__arm64__) || defined(__WIN32__)
+        const char* testingICD = "swiftshader";
+#else
+        const char* testingICD = "lavapipe";
+#endif
+        if (!androidIcd.empty()) {
+            GFXSTREAM_WARNING(
+                "%s: In test environment, enforcing %s ICD, existing ANDROID_EMU_VK_ICD "
+                "value('%s') will be ignored",
+                __func__, testingICD, androidIcd.c_str());
+        } else {
+            GFXSTREAM_INFO("%s: In test environment, enforcing %s ICD.", __func__, testingICD);
+        }
+        gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", testingICD);
+        androidIcd = testingICD;
+    } else if (androidIcd == "") {
         // Rely on user to set VK_DRIVER_FILES
         return;
     }
 
     // In high integrity mode (e.g. admin mode on windows), loader won't be able to read the
     // environment variables. TODO(b/446119531) Load the driver dlls directly in this case.
+    // Note: in testing mode the loader allows env vars in high integrity mode
     const bool highIntegrityMode = processInHighIntegrityMode();
-    if (highIntegrityMode) {
+    if (highIntegrityMode && !forTesting) {
         GFXSTREAM_ERROR("%s: Vulkan ICD selection is not supported with elevated permissions.",
                         __func__);
     }
 
-    if (forTesting) {
-        const char* testingICD = "lavapipe";
-        GFXSTREAM_INFO("%s: In test environment, enforcing %s ICD.", __func__, testingICD);
-        gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", testingICD);
-        androidIcd = testingICD;
-    }
     if (androidIcd == "lavapipe") {
         GFXSTREAM_INFO("%s: ICD set to 'lavapipe', using Lavapipe ICD", __func__);
         setIcdPaths("lvp_icd.json");
@@ -162,7 +174,7 @@ class SharedLibraries {
             return false;
         }
 
-        auto library = gfxstream::base::SharedLibrary::open(path.c_str());
+        auto library = SharedLibrary::open(path.c_str());
         if (library) {
             mLibs.push_back(library);
             GFXSTREAM_INFO("Added library: %s", path.c_str());
@@ -197,7 +209,7 @@ class SharedLibraries {
 
    private:
     size_t mSizeLimit;
-    std::vector<gfxstream::base::SharedLibrary*> mLibs;
+    std::vector<SharedLibrary*> mLibs;
 };
 
 static constexpr size_t getVulkanLibraryNumLimits() {
@@ -239,39 +251,38 @@ class VulkanDispatchImpl {
             };
         }
 
+        std::vector<std::string> possiblePaths;
         const std::vector<std::string> possibleBasenames = getPossibleLoaderPathBasenames();
 
-        const std::string explicitIcd = gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD");
-
-#ifdef _WIN32
-        constexpr const bool isWindows = true;
-#else
-        constexpr const bool isWindows = false;
-#endif
-        if (explicitIcd.empty() || isWindows) {
-            return possibleBasenames;
-        }
-
+        // 1. Add paths relative to the program/launcher directories.
         std::vector<std::string> possibleDirectories;
 
-        if (mForTesting || explicitIcd == "mock") {
-            possibleDirectories = {
-                pj({gfxstream::base::getProgramDirectory(), "testlib64"}),
-                pj({gfxstream::base::getLauncherDirectory(), "testlib64"}),
-            };
+        // If in testing mode, prioritize testlib64.
+        if (mForTesting) {
+            possibleDirectories.push_back(
+                pj({gfxstream::base::getProgramDirectory(), "testlib64"}));
+            possibleDirectories.push_back(
+                pj({gfxstream::base::getLauncherDirectory(), "testlib64"}));
         }
 
+        // Always add lib64/vulkan paths as a primary or secondary option.
         possibleDirectories.push_back(
             pj({gfxstream::base::getProgramDirectory(), "lib64", "vulkan"}));
         possibleDirectories.push_back(
             pj({gfxstream::base::getLauncherDirectory(), "lib64", "vulkan"}));
 
-        std::vector<std::string> possiblePaths;
+
         for (const std::string& possibleDirectory : possibleDirectories) {
             for (const std::string& possibleBasename : possibleBasenames) {
                 possiblePaths.push_back(pj({possibleDirectory, possibleBasename}));
             }
         }
+
+        // 2. Add system-wide basenames last, as an ultimate fallback.
+        for (const std::string& possibleBasename : possibleBasenames) {
+            possiblePaths.push_back(possibleBasename);
+        }
+
         return possiblePaths;
     }
 
@@ -322,9 +333,9 @@ void VulkanDispatchImpl::initialize(bool forTesting) {
     mForTesting = forTesting;
     initIcdPaths(mForTesting);
 
-    // In verbose logging mode, also enable vulkan loader error and warning messages
+    // In verbose logging and testing modes, also enable vulkan loader error and warning messages
     gfxstream::host::LogLevel logLevel = gfxstream::host::GetGfxstreamLogLevel();
-    if (logLevel >= gfxstream::host::LogLevel::kVerbose) {
+    if (forTesting || logLevel >= gfxstream::host::LogLevel::kVerbose) {
         // Set the env var only if the user didn't set it already
         if (gfxstream::base::getEnvironmentVariable("VK_LOADER_DEBUG").empty()) {
             GFXSTREAM_VERBOSE("Enabling error messages from vulkan loader");

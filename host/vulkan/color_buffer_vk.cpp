@@ -22,11 +22,11 @@ namespace vk {
 
 /*static*/
 std::unique_ptr<ColorBufferVk> ColorBufferVk::create(VkEmulation& vkEmulation, uint32_t handle,
-                                                     uint32_t width, uint32_t height, GLenum format,
-                                                     FrameworkFormat frameworkFormat,
+                                                     uint32_t width, uint32_t height,
+                                                     GfxstreamFormat format,
                                                      bool vulkanOnly, uint32_t memoryProperty,
                                                      gfxstream::Stream* stream, uint32_t mipLevels) {
-    if (!vkEmulation.createVkColorBuffer(width, height, format, frameworkFormat, handle, vulkanOnly,
+    if (!vkEmulation.createVkColorBuffer(width, height, format, handle, vulkanOnly,
                                          memoryProperty, mipLevels)) {
         GFXSTREAM_DEBUG("Failed to create ColorBufferVk:%d", handle);
         return nullptr;
@@ -61,6 +61,15 @@ bool ColorBufferVk::readToBytes(std::vector<uint8_t>* outBytes) {
 bool ColorBufferVk::readToBytes(uint32_t x, uint32_t y, uint32_t w, uint32_t h, void* outBytes,
                                 uint64_t outBytesSize) {
     return mVkEmulation.readColorBufferToBytes(mHandle, x, y, w, h, outBytes, outBytesSize);
+}
+
+bool ColorBufferVk::readPixelsScaled(int pixelsWidth, int pixelsHeight, int pixelsRotation,
+                                     const Rect& rect, GfxstreamFormat pixelsFormat,
+                                     void* outPixels,
+                                     const std::optional<std::array<float, 16>>& colorTransform) {
+    return mVkEmulation.readColorBufferPixelsScaled(mHandle, pixelsWidth, pixelsHeight,
+                                                    static_cast<GFXSTREAM_ROTATION>(pixelsRotation), rect, pixelsFormat, outPixels,
+                                                    colorTransform);
 }
 
 bool ColorBufferVk::updateFromBytes(const std::vector<uint8_t>& bytes) {

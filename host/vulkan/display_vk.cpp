@@ -16,12 +16,14 @@
 
 #include <algorithm>
 #include <glm/glm.hpp>
-#include <glm/gtx/matrix_transform_2d.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include "gfxstream/common/logging.h"
+#include "gfxstream/host/display_operations.h"
 #include "gfxstream/system/System.h"
-#include "vulkan/vk_format_utils.h"
 #include "vulkan/vk_enum_string_helper.h"
+#include "vulkan/vk_format_utils.h"
 
 namespace gfxstream {
 namespace host {
@@ -96,7 +98,7 @@ DisplayVk::~DisplayVk() {
 void DisplayVk::drainQueues() {
     {
         gfxstream::base::AutoLock lock(*m_swapChainVkQueueLock);
-        VK_CHECK(vk_util::waitForVkQueueIdleWithRetry(m_vk, m_swapChainVkQueue));
+        VK_CHECK(m_vk.vkQueueWaitIdle(m_swapChainVkQueue));
     }
     // We don't assume all VkCommandBuffer submitted to m_compositorVkQueueLock is always followed
     // by another operation on the m_swapChainVkQueue. Therefore, only waiting for the
@@ -104,7 +106,7 @@ void DisplayVk::drainQueues() {
     if (m_swapChainVkQueue != m_compositorVkQueue)
     {
         gfxstream::base::AutoLock lock(*m_compositorVkQueueLock);
-        VK_CHECK(vk_util::waitForVkQueueIdleWithRetry(m_vk, m_compositorVkQueue));
+        VK_CHECK(m_vk.vkQueueWaitIdle(m_compositorVkQueue));
     }
 }
 
@@ -175,7 +177,9 @@ bool DisplayVk::recreateSwapchain() {
     return true;
 }
 
-DisplayVk::PostResult DisplayVk::post(const BorrowedImageInfo* sourceImageInfo, float rotationDegrees) {
+DisplayVk::PostResult DisplayVk::post(const BorrowedImageInfo* sourceImageInfo,
+                                      float rotationDegrees,
+                                      const std::optional<std::array<float, 16>>& colorTransform) {
     auto completedFuture = std::async(std::launch::deferred, [] {}).share();
     completedFuture.wait();
 
@@ -207,14 +211,16 @@ DisplayVk::PostResult DisplayVk::post(const BorrowedImageInfo* sourceImageInfo, 
         GFXSTREAM_INFO("Recreating swapchain completed.");
     }
 
-    auto result = postImpl(sourceImageInfo, rotationDegrees);
+    auto result = postImpl(sourceImageInfo, rotationDegrees, colorTransform);
     if (!result.success) {
         m_needToRecreateSwapChain = true;
     }
     return result;
 }
 
-DisplayVk::PostResult DisplayVk::postImpl(const BorrowedImageInfo* sourceImageInfo, float rotationDegrees) {
+DisplayVk::PostResult DisplayVk::postImpl(
+    const BorrowedImageInfo* sourceImageInfo, float rotationDegrees,
+    const std::optional<std::array<float, 16>>& colorTransform) {
     auto completedFuture = std::async(std::launch::deferred, [] {}).share();
     completedFuture.wait();
 
@@ -440,7 +446,7 @@ DisplayVk::PostResult DisplayVk::postImpl(const BorrowedImageInfo* sourceImageIn
 
     CompositorVkBase::ImmediateModeResources* imResources =
         m_compositorVk ? m_compositorVk->acquireImmediateModeResources() : nullptr;
-    const bool useBlit = !imResources || (rotationDegrees == 0);
+    const bool useBlit = !imResources || (rotationDegrees == 0 && !colorTransform.has_value());
 
     if (useBlit) {
         // Use vkCmdBlitImage to post the image
@@ -527,7 +533,8 @@ DisplayVk::PostResult DisplayVk::postImpl(const BorrowedImageInfo* sourceImageIn
         m_compositorVk->drawImage(cmdBuff, m_swapChainStateVk->getFormat(),
                                   swapchainImageExtent.width, swapchainImageExtent.height,
                                   currentSwapchainRenderpass, currentSwapchainFramebuffer,
-                                  imResources, sourceImageInfoVk->imageView, rotationDegrees);
+                                  imResources, sourceImageInfoVk->imageView, rotationDegrees,
+                                  colorTransform);
     }
 
     // Render screen mask overlay

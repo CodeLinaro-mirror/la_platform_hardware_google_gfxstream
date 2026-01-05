@@ -37,11 +37,16 @@
 #include "gfxstream/host/ChecksumCalculatorThreadInfo.h"
 #include "gfxstream/host/tracing.h"
 #include "gfxstream/host/gl_enums.h"
+#include "gfxstream/host/gfxstream_format.h"
 #include "gfxstream/host/guest_operations.h"
 #include "gfxstream/host/renderer_operations.h"
 #include "gfxstream/host/sync_device.h"
 #include "vulkan/vk_common_operations.h"
 #include "vulkan/vk_decoder_global_state.h"
+
+// defined in guest/goldfish_sync.h
+#define GOLDFISH_SYNC_VULKAN_SEMAPHORE_SYNC 0x00000001
+#define GOLDFISH_SYNC_VULKAN_QSRI 0x00000002
 
 namespace gfxstream {
 namespace host {
@@ -310,10 +315,9 @@ static EGLint rcQueryEGLString(EGLenum name, void* buffer, EGLint bufferSize)
 }
 
 static bool shouldEnableAsyncSwap(const gfxstream::host::FeatureSet& features) {
-    bool isPhone = true;
-    bool playStoreImage = features.PlayStoreImage.enabled;
-    return features.GlAsyncSwap.enabled &&
-           gfxstream_sync_device_exists() && (isPhone || playStoreImage) &&
+     return features.GlAsyncSwap.enabled &&
+            !features.VulkanNativeSwapchain.enabled &&
+           gfxstream_sync_device_exists() &&
            sizeof(void*) == 8;
 }
 
@@ -802,7 +806,8 @@ static void rcDestroyWindowSurface(uint32_t windowSurface)
 }
 
 static uint32_t rcCreateColorBuffer(uint32_t width,
-                                    uint32_t height, GLenum internalFormat)
+                                    uint32_t height,
+                                    GLenum internalFormat)
 {
     FrameBuffer* fb = FrameBuffer::getFB();
     if (!fb) {
@@ -810,8 +815,8 @@ static uint32_t rcCreateColorBuffer(uint32_t width,
         return 0;
     }
 
-    return fb->createColorBuffer(width, height, internalFormat,
-                                 FRAMEWORK_FORMAT_GL_COMPATIBLE);
+    return fb->createColorBufferDeprecated(width, height, internalFormat,
+                                           FRAMEWORK_FORMAT_GL_COMPATIBLE);
 }
 
 static uint32_t rcCreateColorBufferDMA(uint32_t width,
@@ -824,8 +829,8 @@ static uint32_t rcCreateColorBufferDMA(uint32_t width,
         return 0;
     }
 
-    return fb->createColorBuffer(width, height, internalFormat,
-                                 (FrameworkFormat)frameworkFormat);
+    return fb->createColorBufferDeprecated(width, height, internalFormat,
+                                           (FrameworkFormat)frameworkFormat);
 }
 
 static int rcOpenColorBuffer2(uint32_t colorbuffer)
@@ -994,7 +999,7 @@ static void rcReadColorBuffer(uint32_t colorBuffer,
         return;
     }
 
-    fb->readColorBuffer(colorBuffer, x, y, width, height, format, type, pixels);
+    fb->readColorBufferDeprecated(colorBuffer, x, y, width, height, format, type, pixels);
 }
 
 static int rcUpdateColorBuffer(uint32_t colorBuffer,
@@ -1010,7 +1015,7 @@ static int rcUpdateColorBuffer(uint32_t colorBuffer,
         return -1;
     }
 
-    fb->updateColorBuffer(colorBuffer, x, y, width, height, format, type, pixels);
+    fb->updateColorBufferDeprecated(colorBuffer, x, y, width, height, format, type, pixels);
 
     GRSYNC_DPRINT("unlock gralloc cb lock");
     sGrallocSync()->unlockColorBufferPrepare();
@@ -1032,8 +1037,8 @@ static int rcUpdateColorBufferDMA(uint32_t colorBuffer,
         return -1;
     }
 
-    fb->updateColorBuffer(colorBuffer, x, y, width, height,
-                          format, type, pixels);
+    fb->updateColorBufferDeprecated(colorBuffer, x, y, width, height,
+                                    format, type, pixels);
 
     GRSYNC_DPRINT("unlock gralloc cb lock");
     sGrallocSync()->unlockColorBufferPrepare();
@@ -1075,23 +1080,24 @@ static void rcSelectChecksumHelper(uint32_t protocol, uint32_t reserved) {
 static void rcTriggerWait(uint64_t eglsync_ptr,
                           uint64_t thread_ptr,
                           uint64_t timeline) {
-    if (thread_ptr == 1) {
+    if (thread_ptr == GOLDFISH_SYNC_VULKAN_SEMAPHORE_SYNC) {
         // Is vulkan sync fd;
         // just signal right away for now
-        EGLSYNC_DPRINT("vkFence=0x%llx timeline=0x%llx", eglsync_ptr,
+        EGLSYNC_DPRINT("GOLDFISH_SYNC_VULKAN_SEMAPHORE_SYNC - vkFence=0x%llx timeline=0x%llx", eglsync_ptr,
                        thread_ptr, timeline);
         SyncThread::get()->triggerWaitVk(reinterpret_cast<VkFence>(eglsync_ptr),
                                          timeline);
-    } else if (thread_ptr == 2) {
-        EGLSYNC_DPRINT("vkFence=0x%llx timeline=0x%llx", eglsync_ptr,
+    } else if (thread_ptr == GOLDFISH_SYNC_VULKAN_QSRI) {
+        EGLSYNC_DPRINT("GOLDFISH_SYNC_VULKAN_QSRI - VkImage=0x%llx timeline=0x%llx", eglsync_ptr,
                        thread_ptr, timeline);
         SyncThread::get()->triggerWaitVkQsri(reinterpret_cast<VkImage>(eglsync_ptr), timeline);
     } else {
         EmulatedEglFenceSync* fenceSync = EmulatedEglFenceSync::getFromHandle(eglsync_ptr);
         FrameBuffer* fb = FrameBuffer::getFB();
         if (fb && fenceSync && fenceSync->isCompositionFence()) {
-            fb->scheduleVsyncTask([eglsync_ptr, fenceSync, timeline](uint64_t) {
+            fb->scheduleVsyncTask([eglsync_ptr, fenceSync, timeline, thread_ptr](uint64_t) {
                 (void)eglsync_ptr;
+                (void)thread_ptr;
                 EGLSYNC_DPRINT(
                     "vsync: eglsync=0x%llx fenceSync=%p thread_ptr=0x%llx "
                     "timeline=0x%llx",
@@ -1134,7 +1140,7 @@ static void rcCreateSyncKHR(EGLenum type,
                                    outSyncThread);
 
     RenderThreadInfo* tInfo = RenderThreadInfo::get();
-    if (tInfo && outSync && shouldEnableVsyncGatedSyncFences(fb->getFeatures())) {
+    if (fb->hasEmulationGl() && tInfo && outSync && shouldEnableVsyncGatedSyncFences(fb->getFeatures())) {
         auto fenceSync = reinterpret_cast<EmulatedEglFenceSync*>(outSync);
         fenceSync->setIsCompositionFence(tInfo->m_isCompositionThread);
     }
@@ -1416,8 +1422,8 @@ static void rcCreateColorBufferWithHandle(
         return;
     }
 
-    fb->createColorBufferWithResourceHandle(width, height, internalFormat,
-                                            FRAMEWORK_FORMAT_GL_COMPATIBLE, handle);
+    fb->createColorBufferWithResourceHandleDeprecated(
+        width, height, internalFormat, FRAMEWORK_FORMAT_GL_COMPATIBLE, handle);
 }
 
 static uint32_t rcCreateBuffer2(uint64_t size, uint32_t memoryProperty) {
@@ -1551,7 +1557,8 @@ static void rcDestroySyncKHRAsync(uint64_t handle) {
 static int rcReadColorBufferDMA(uint32_t colorBuffer,
                                 GLint x, GLint y,
                                 GLint width, GLint height,
-                                GLenum format, GLenum type, void* pixels, uint32_t pixels_size)
+                                GLenum format, GLenum type, void* pixels,
+                                uint32_t pixels_size)
 {
     FrameBuffer* fb = FrameBuffer::getFB();
     if (!fb) {
@@ -1559,7 +1566,8 @@ static int rcReadColorBufferDMA(uint32_t colorBuffer,
         return -1;
     }
 
-    fb->readColorBuffer(colorBuffer, x, y, width, height, format, type, pixels, pixels_size);
+    fb->readColorBufferDeprecated(colorBuffer, x, y, width, height, format,
+                                  type, pixels, pixels_size);
     return 0;
 }
 

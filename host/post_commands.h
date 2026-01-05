@@ -14,13 +14,15 @@
 
 #pragma once
 
-#include <GLES2/gl2.h>
-
+#include <array>
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include "gfxstream/host/display_operations.h"
+#include "gfxstream/host/gfxstream_format.h"
 #include "handle.h"
 #include "render-utils/Renderer.h"
 
@@ -55,6 +57,9 @@ struct Post {
     std::unique_ptr<CompletionCallback> completionCallback = nullptr;
     std::unique_ptr<Block> block = nullptr;
     HandleType cbHandle = 0;
+    std::optional<std::array<float, 16>> colorTransform;
+
+    //TODO: remove union here and separate into message structures
     union {
         ColorBuffer* cb;
         struct {
@@ -65,9 +70,8 @@ struct Post {
             ColorBuffer* cb;
             int screenwidth;
             int screenheight;
-            GLenum format;
-            GLenum type;
             int rotation;
+            GfxstreamFormat pixelsFormat;
             void* pixels;
             Rect rect;
         } screenshot;

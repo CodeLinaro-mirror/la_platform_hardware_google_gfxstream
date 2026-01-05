@@ -25,8 +25,8 @@
 #include "hwc2.h"
 #include "post_commands.h"
 #include "gfxstream/Compiler.h"
-#include "gfxstream/synchronization/Lock.h"
-#include "gfxstream/synchronization/MessageChannel.h"
+#include "gfxstream/host/gfxstream_format.h"
+
 
 namespace gfxstream {
 namespace host {
@@ -41,7 +41,8 @@ class PostWorker {
 
     // post: posts the next color buffer.
     // Assumes framebuffer lock is held.
-    void post(ColorBuffer* cb, std::unique_ptr<Post::CompletionCallback> postCallback);
+    void post(ColorBuffer* cb, std::unique_ptr<Post::CompletionCallback> postCallback,
+              const std::optional<std::array<float, 16>>& colorTransform);
 
     // viewport: (re)initializes viewport dimensions.
     // Assumes framebuffer lock is held.
@@ -60,8 +61,9 @@ class PostWorker {
     void clear();
 
     // screenshot: readbacks emulator display image to a buffer
-    void screenshot(ColorBuffer* cb, int screenwidth, int screenheight, GLenum format,
-                GLenum type, int skinRotation, void* outPixels, Rect rect);
+    void screenshot(ColorBuffer* cb, int screenwidth, int screenheight, int skinRotation,
+                    GfxstreamFormat pixelsFormat, void* outPixels, const Rect& rect,
+                    const std::optional<std::array<float, 16>>& colorTransform);
 
     // The block task will set the scheduledSignal promise when the task is scheduled, and wait
     // until continueSignal is ready before completes.
@@ -73,7 +75,8 @@ class PostWorker {
    protected:
     void runTask(std::packaged_task<void()>);
     // Impl versions of the above, so we can run it from separate threads
-    virtual std::shared_future<void> postImpl(ColorBuffer* cb) = 0;
+    virtual std::shared_future<void> postImpl(ColorBuffer* cb,
+              const std::optional<std::array<float, 16>>& colorTransform) = 0;
     virtual void viewportImpl(int width, int height) = 0;
     virtual void clearImpl() = 0;
     virtual void exitImpl() = 0;

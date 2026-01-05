@@ -18,44 +18,23 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <functional>
-#include <vector>
-
-#include "gfxstream/files/PathUtils.h"
-#include "gfxstream/common/logging.h"
-
 #ifndef _WIN32
 #include <dlfcn.h>
 #include <stdlib.h>
 #endif
 
+#include <functional>
+#include <vector>
+
+#include "gfxstream/common/logging.h"
+#include "gfxstream/files/PathUtils.h"
+#include "gfxstream/strings.h"
+#include "gfxstream/system/System.h"
+
 using gfxstream::base::PathUtils;
 
 namespace gfxstream {
-namespace base {
-
-class LibrarySearchPaths {
-public:
-    LibrarySearchPaths() = default;
-
-    void addPath(const char* path) {
-        mPaths.push_back(path);
-    }
-
-    void forEachPath(std::function<void(const std::string&)> func) {
-        for (const auto& path: mPaths) {
-            func(path);
-        }
-    }
-
-private:
-    std::vector<std::string> mPaths;
-};
-
-LibrarySearchPaths* sSearchPaths() {
-    static LibrarySearchPaths* paths = new LibrarySearchPaths;
-    return paths;
-}
+namespace host {
 
 static SharedLibrary::LibraryMap s_libraryMap;
 
@@ -72,8 +51,8 @@ SharedLibrary* SharedLibrary::open(const char* libraryName,
     auto lib = s_libraryMap.find(libraryName);
 
     if (lib == s_libraryMap.end()) {
-        GFXSTREAM_INFO("SharedLibrary::open for [%s]: not found in map, open for the first time",
-             libraryName);
+        GFXSTREAM_VERBOSE("SharedLibrary::open for [%s]: not found in map, open for the first time",
+                          libraryName);
         SharedLibrary* load = do_open(libraryName, error, errorSize);
         if (load != nullptr) {
             s_libraryMap[libraryName] =
@@ -89,36 +68,21 @@ SharedLibrary* SharedLibrary::open(const char* libraryName,
 
 // static
 SharedLibrary* SharedLibrary::do_open(const char* libraryName,
-                                   char* error,
-                                   size_t errorSize) {
-    GFXSTREAM_INFO("SharedLibrary::open for [%s] (win32): call LoadLibrary", libraryName);
+                                      char* error,
+                                      size_t errorSize) {
+    GFXSTREAM_VERBOSE("SharedLibrary::open for [%s] (win32): call LoadLibrary", libraryName);
     HMODULE lib = LoadLibraryA(libraryName);
-
-    // Try a bit harder to find the shared library if we cannot find it.
-    if (!lib) {
-        GFXSTREAM_INFO("SharedLibrary::open for [%s] can't find in default path. Searching alternatives...",
-             libraryName);
-        sSearchPaths()->forEachPath([&lib, libraryName](const std::string& path) {
-            if (!lib) {
-                auto libName = PathUtils::join(path, libraryName);
-                GFXSTREAM_INFO("SharedLibrary::open for [%s]: trying [%s]", libraryName, libName.c_str());
-                lib = LoadLibraryA(libName.c_str());
-                GFXSTREAM_INFO("SharedLibrary::open for [%s]: trying [%s]. found? %d", libraryName,
-                     libName.c_str(), lib != nullptr);
-            }
-        });
-    }
 
     if (lib) {
         constexpr size_t kMaxPathLength = 2048;
         char fullPath[kMaxPathLength];
         GetModuleFileNameA(lib, fullPath, kMaxPathLength);
-        GFXSTREAM_INFO("SharedLibrary::open succeeded for [%s]. File name: [%s]", libraryName, fullPath);
+        GFXSTREAM_VERBOSE("SharedLibrary::open succeeded for [%s]. File name: [%s]", libraryName, fullPath);
         return new SharedLibrary(lib);
     }
 
     if (errorSize == 0) {
-        GFXSTREAM_INFO("SharedLibrary::open for [%s] failed, but no error", libraryName);
+        GFXSTREAM_VERBOSE("SharedLibrary::open for [%s] failed, but no error", libraryName);
         return NULL;
     }
 
@@ -151,7 +115,7 @@ SharedLibrary* SharedLibrary::do_open(const char* libraryName,
     if (ret > 0 && error[ret - 1] == '\r') {
         error[--ret] = '\0';
     }
-    GFXSTREAM_INFO("Failed to load [%s]. Error string: [%s]", libraryName, error);
+    GFXSTREAM_VERBOSE("Failed to load [%s]. Error string: [%s]", libraryName, error);
 
     return NULL;
 }
@@ -181,9 +145,9 @@ SharedLibrary::FunctionPtr SharedLibrary::findSymbol(
 
 // static
 SharedLibrary* SharedLibrary::do_open(const char* libraryName,
-                                   char* error,
-                                   size_t errorSize) {
-    GFXSTREAM_INFO("SharedLibrary::open for [%s] (posix): begin", libraryName);
+                                      char* error,
+                                      size_t errorSize) {
+    GFXSTREAM_VERBOSE("SharedLibrary::open for [%s] (posix): begin", libraryName);
 
     const char* libPath = libraryName;
     char* path = NULL;
@@ -212,60 +176,50 @@ SharedLibrary* SharedLibrary::do_open(const char* libraryName,
     // On OSX, some libraries don't include an extension (notably OpenGL)
     // On OSX we try to open |libraryName| first.  If that doesn't exist,
     // we try |libraryName|.dylib
-    GFXSTREAM_INFO("SharedLibrary::open for [%s] (posix,darwin): call dlopen", libraryName);
+    GFXSTREAM_VERBOSE("SharedLibrary::open for [%s] (posix,darwin): call dlopen", libraryName);
     void* lib = dlopen(libraryName, RTLD_NOW);
     if (lib == NULL) {
-        GFXSTREAM_INFO(
+        GFXSTREAM_VERBOSE(
             "SharedLibrary::open for [%s] (posix,darwin): failed, "
             "try again with [%s]",
             libraryName, libPath);
         lib = dlopen(libPath, RTLD_NOW);
-
-        sSearchPaths()->forEachPath([&lib, libraryName, libPath](const std::string& path) {
-            if (!lib) {
-                auto libName = PathUtils::join(path, libraryName);
-                GFXSTREAM_INFO(
-                    "SharedLibrary::open for [%s] (posix,darwin): still failed, "
-                    "try [%s]",
-                    libraryName, libName.c_str());
-                lib = dlopen(libName.c_str(), RTLD_NOW);
-                if (!lib) {
-                    auto libPathName = PathUtils::join(path, libPath);
-                    GFXSTREAM_INFO(
-                        "SharedLibrary::open for [%s] (posix,darwin): still failed, "
-                        "try [%s]",
-                        libraryName, libPathName.c_str());
-                    lib = dlopen(libPathName.c_str(), RTLD_NOW);
-                }
-            }
-        });
     }
 #else
-    GFXSTREAM_INFO("SharedLibrary::open for [%s] (posix,linux): call dlopen on [%s]", libraryName, libPath);
-    void* lib = dlopen(libPath, RTLD_NOW);
-#endif
-
-    sSearchPaths()->forEachPath([&lib, libPath, libraryName](const std::string& path) {
-        if (!lib) {
-            auto libPathName = PathUtils::join(path, libPath);
-            GFXSTREAM_INFO("SharedLibrary::open for [%s] (posix): try again with %s", libraryName,
-                 libPathName.c_str());
-            lib = dlopen(libPathName.c_str(), RTLD_NOW);
+    GFXSTREAM_VERBOSE("SharedLibrary::open for [%s] (posix,linux): call dlopen on [%s]", libraryName, libPath);
+    void* lib = nullptr;
+    const std::vector<std::string> ldLibraryPaths =
+        gfxstream::Split(gfxstream::base::getEnvironmentVariable("LD_LIBRARY_PATH"), ":");
+    for (const std::string& ldLibraryPath : ldLibraryPaths) {
+        if (ldLibraryPath.empty()) {
+            continue;
         }
-    });
+
+        const std::string fullpath = PathUtils::join(ldLibraryPath, libPath);
+        GFXSTREAM_VERBOSE("Calling dlopen on %s.", fullpath.c_str());
+
+        lib = dlopen(fullpath.c_str(), RTLD_NOW);
+        if (lib != nullptr) {
+            break;
+        }
+    }
+    if (lib == nullptr) {
+        lib = dlopen(libPath, RTLD_NOW);
+    }
+#endif
 
     if (path) {
         free(path);
     }
 
     if (lib) {
-        GFXSTREAM_INFO("SharedLibrary::open succeeded for [%s].", libraryName);
+        GFXSTREAM_VERBOSE("SharedLibrary::open succeeded for [%s].", libraryName);
         return new SharedLibrary(lib);
     }
 
     snprintf(error, errorSize, "%s", dlerror());
-    GFXSTREAM_INFO("SharedLibrary::open for [%s] failed (posix). dlerror: [%s]", libraryName, error);
-    return NULL;
+    GFXSTREAM_VERBOSE("SharedLibrary::open for [%s] failed (posix). dlerror: [%s]", libraryName, error);
+    return nullptr;
 }
 
 SharedLibrary::SharedLibrary(HandleType lib) : mLib(lib) {}
@@ -279,17 +233,12 @@ SharedLibrary::~SharedLibrary() {
 SharedLibrary::FunctionPtr SharedLibrary::findSymbol(
         const char* symbolName) const {
     if (!mLib || !symbolName) {
-        return NULL;
+        return nullptr;
     }
     return reinterpret_cast<FunctionPtr>(dlsym(mLib, symbolName));
 }
 
 #endif  // !_WIN32
 
-// static
-void SharedLibrary::addLibrarySearchPath(const char* path) {
-    sSearchPaths()->addPath(path);
-}
-
-}  // namespace base
-}  // namespace android
+}  // namespace host
+}  // namespace gfxstream

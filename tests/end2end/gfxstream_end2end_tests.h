@@ -44,12 +44,12 @@
 #include <vulkan/vk_android_native_buffer.h>
 // clang-format on
 
-#include "kumquat_instance.h"
 #include "Sync.h"
 #include "gfxstream/Expected.h"
 #include "gfxstream/guest/ANativeWindow.h"
 #include "gfxstream/guest/GfxStreamGralloc.h"
 #include "gfxstream/guest/RenderControlApi.h"
+#include "kumquat_instance.h"
 
 namespace gfxstream {
 namespace tests {
@@ -57,14 +57,12 @@ namespace tests {
 constexpr const bool kSaveImagesIfComparisonFailed = false;
 
 MATCHER(IsOk, "an ok result") {
-  auto& result = arg;
-  if (!result.ok()) {
-    *result_listener << "which is an error with message: \""
-                     << result.error()
-                     << "\"";
-    return false;
-  }
-  return true;
+    auto& result = arg;
+    if (!result.ok()) {
+        *result_listener << "which is an error with message: \"" << result.error() << "\"";
+        return false;
+    }
+    return true;
 }
 
 MATCHER(IsError, "an error result") {
@@ -412,6 +410,8 @@ class ScopedAHardwareBuffer {
     AHardwareBuffer* mHandle = nullptr;
 };
 
+void RGBToYUV(uint8_t r, uint8_t g, uint8_t b, uint8_t* outY, uint8_t* outU, uint8_t* outV);
+
 struct PixelR8G8B8A8 {
     PixelR8G8B8A8() = default;
 
@@ -461,7 +461,40 @@ struct PixelR8G8B8A8 {
     friend void PrintTo(const PixelR8G8B8A8& pixel, std::ostream* os) { *os << pixel.ToString(); }
 };
 
-void RGBToYUV(uint8_t r, uint8_t g, uint8_t b, uint8_t* outY, uint8_t* outU, uint8_t* outV);
+struct PixelY8U8V8 {
+    PixelY8U8V8(uint8_t yy, uint8_t uu, uint8_t vv) : y(yy), u(uu), v(vv) {}
+
+    static PixelY8U8V8 FromR8G8B8A8(const PixelR8G8B8A8& color) {
+        uint8_t y = 0;
+        uint8_t u = 0;
+        uint8_t v = 0;
+        RGBToYUV(color.r, color.g, color.b, &y, &u, &v);
+        return PixelY8U8V8(y, u, v);
+    }
+
+    uint8_t y = 0;
+    uint8_t u = 0;
+    uint8_t v = 0;
+
+    std::string ToString() const {
+        std::string ret = std::string("Pixel");
+        ret += std::string(" {");
+        ret += std::string(" y:") + std::to_string(static_cast<int>(y));
+        ret += std::string(" u:") + std::to_string(static_cast<int>(u));
+        ret += std::string(" v:") + std::to_string(static_cast<int>(v));
+        ret += std::string(" }");
+        return ret;
+    }
+
+    bool operator==(const PixelY8U8V8& rhs) const {
+        const auto& lhs = *this;
+        return std::tie(lhs.y, lhs.u, lhs.v) == std::tie(rhs.y, rhs.u, rhs.v);
+    }
+
+    friend void PrintTo(const PixelY8U8V8& pixel, std::ostream* os) { *os << pixel.ToString(); }
+};
+
+using PixelFillColor = std::variant<PixelR8G8B8A8, PixelY8U8V8>;
 
 std::vector<uint8_t> Fill(uint32_t w, uint32_t h, const PixelR8G8B8A8& pixel);
 
@@ -473,8 +506,8 @@ struct Image {
 Image ImageFromColor(uint32_t w, uint32_t h, const PixelR8G8B8A8& pixel);
 
 enum class GfxstreamTransport {
-  kVirtioGpuAsg,
-  kVirtioGpuPipe,
+    kVirtioGpuAsg,
+    kVirtioGpuPipe,
 };
 
 struct TestParams {
@@ -512,16 +545,11 @@ class GfxstreamEnd2EndTest : public ::testing::TestWithParam<TestParams> {
     void TearDownGuest();
     void TearDown() override;
 
-    void SetUpEglContextAndSurface(uint32_t contextVersion,
-                                   uint32_t width,
-                                   uint32_t height,
-                                   EGLDisplay* outDisplay,
-                                   EGLContext* outContext,
+    void SetUpEglContextAndSurface(uint32_t contextVersion, uint32_t width, uint32_t height,
+                                   EGLDisplay* outDisplay, EGLContext* outContext,
                                    EGLSurface* outSurface);
 
-    void TearDownEglContextAndSurface(EGLDisplay display,
-                                      EGLContext context,
-                                      EGLSurface surface);
+    void TearDownEglContextAndSurface(EGLDisplay display, EGLContext context, EGLSurface surface);
 
     Result<ScopedGlShader> SetUpShader(GLenum type, const std::string& source);
 
@@ -547,19 +575,26 @@ class GfxstreamEnd2EndTest : public ::testing::TestWithParam<TestParams> {
 
     Result<Image> AsImage(ScopedAHardwareBuffer& ahb);
 
-    Result<Ok> FillAhb(ScopedAHardwareBuffer& ahb, PixelR8G8B8A8 color);
+    Result<Ok> FillAhb(ScopedAHardwareBuffer& ahb, PixelFillColor color);
+    Result<Ok> FillAhbWithCheckerboard(ScopedAHardwareBuffer& ahb, const uint32_t tileWidth,
+                                       PixelFillColor color1, PixelFillColor color2);
 
     Result<ScopedAHardwareBuffer> CreateAHBFromImage(const std::string& basename);
 
     Result<ScopedAHardwareBuffer> CreateAHBWithColor(const uint32_t width, const uint32_t height,
                                                      const uint32_t ahbFormat,
-                                                     const PixelR8G8B8A8& color);
+                                                     const PixelFillColor& color);
+    Result<ScopedAHardwareBuffer> CreateAHBWithCheckerboard(
+        const uint32_t width, const uint32_t height, const uint32_t tileWidth,
+        const uint32_t ahbFormat, const PixelFillColor& color1, const PixelFillColor& color2);
 
     bool ArePixelsSimilar(uint32_t expectedPixel, uint32_t actualPixel);
 
     bool AreImagesSimilar(const Image& expected, const Image& actual);
 
     Result<Ok> CompareAHBWithGolden(ScopedAHardwareBuffer& ahb, const std::string& goldenBasename);
+
+    Result<Ok> AhbIsEntirely(ScopedAHardwareBuffer& ahb, const PixelR8G8B8A8& color);
 
     std::unique_ptr<ANativeWindowHelper> mAnwHelper;
     std::unique_ptr<Gralloc> mGralloc;

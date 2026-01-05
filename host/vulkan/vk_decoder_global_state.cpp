@@ -168,7 +168,7 @@ static constexpr const char* const kEmulatedInstanceExtensions[] = {
     VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
 };
 
-static constexpr uint32_t kMaxSafeVersion = VK_MAKE_VERSION(1, 4, 0);
+static constexpr uint32_t kMaxSafeVersion = VK_MAKE_VERSION(1, 3, 0);
 static constexpr uint32_t kMinVersion = VK_MAKE_VERSION(1, 0, 0);
 
 static constexpr uint64_t kPageSizeforBlob = 4096;
@@ -1093,27 +1093,21 @@ class VkDecoderGlobalState::Impl {
         vk_struct_chain_filter<VkDebugUtilsMessengerCreateInfoEXT>(&createInfoFiltered);
 
 #if defined(__APPLE__)
-        if (m_vkEmulation->supportsMoltenVk()) {
+        if (m_vkEmulation->supportsPortabilityEnumeration()) {
             createInfoFiltered.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
         }
 #endif
 
-#if defined(__linux__)
-        // TODO(b/401005629) always lock before the call on linux
-        const bool doLockEarly = true;
-#else
         const bool swiftshader =
             (gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD").compare("swiftshader") ==
              0);
-        // b/155795731: swiftshader needs to lock early.
-        const bool doLockEarly = swiftshader;
-#endif
         VkResult res = VK_SUCCESS;
-        if (!doLockEarly) {
+        if (!swiftshader) {
             res = m_vk->vkCreateInstance(&createInfoFiltered, pAllocator, pInstance);
         }
         std::lock_guard<std::mutex> lock(mMutex);
-        if (doLockEarly) {
+        if (swiftshader) {
+            // b/155795731: inside the lock.
             res = m_vk->vkCreateInstance(&createInfoFiltered, pAllocator, pInstance);
         }
         if (res != VK_SUCCESS) {
@@ -2152,7 +2146,7 @@ class VkDecoderGlobalState::Impl {
         // Enable all portability features supported on the device
         VkPhysicalDevicePortabilitySubsetFeaturesKHR supportedPortabilityFeatures = {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR, nullptr};
-        if (m_vkEmulation->supportsMoltenVk()) {
+        if (m_vkEmulation->supportsPortabilityEnumeration()) {
             VkPhysicalDeviceFeatures2 features2 = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
                 .pNext = &supportedPortabilityFeatures,
@@ -2209,22 +2203,17 @@ class VkDecoderGlobalState::Impl {
         createInfoFiltered.enabledExtensionCount = (uint32_t)updatedDeviceExtensions.size();
         createInfoFiltered.ppEnabledExtensionNames = updatedDeviceExtensions.data();
 
-#if defined(__linux__)
-        // TODO(b/401005629) always lock before the call on linux
-        const bool doLockEarly = true;
-#else
+
         const bool swiftshader =
             (gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD").compare("swiftshader") ==
              0);
-        // b/155795731: swiftshader needs to lock early.
-        const bool doLockEarly = swiftshader;
-#endif
+
         VkResult result = VK_SUCCESS;
-        if (!doLockEarly) {
+        if (!swiftshader) {
             result = vk->vkCreateDevice(physicalDevice, &createInfoFiltered, pAllocator, pDevice);
         }
         std::lock_guard<std::mutex> lock(mMutex);
-        if (doLockEarly) {
+        if (swiftshader) {
             result = vk->vkCreateDevice(physicalDevice, &createInfoFiltered, pAllocator, pDevice);
         }
 
@@ -9322,7 +9311,7 @@ class VkDecoderGlobalState::Impl {
         m_vkEmulation->appendExternalMemoryModeDeviceExtensions(hostAlwaysDeviceExtensions);
 
 #if defined(__APPLE__)
-        if (m_vkEmulation->supportsMoltenVk()) {
+        if (m_vkEmulation->supportsPortabilityEnumeration()) {
             hostAlwaysDeviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
         }
 #endif
@@ -9378,6 +9367,8 @@ class VkDecoderGlobalState::Impl {
 #if defined(__APPLE__)
         if (m_vkEmulation->supportsMoltenVk()) {
             res.push_back(VK_MVK_MACOS_SURFACE_EXTENSION_NAME);
+        }
+        if (m_vkEmulation->supportsPortabilityEnumeration()) {
             res.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
         }
 #endif

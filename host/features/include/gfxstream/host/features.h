@@ -183,6 +183,12 @@ struct FeatureSet {
         "implementation.",
         &map,
     };
+    FeatureInfo MinimalLogging = {
+        "MinimalLogging",
+        "If enabled, Gfxstream will log less info. Useful for preventing logspam "
+        "CI which frequently starts and stops Gfxstream.",
+        &map,
+    };
     FeatureInfo NativeTextureDecompression = {
         "NativeTextureDecompression",
         "If enabled, allows the host to use ASTC and ETC2 formats when supported by "
@@ -194,12 +200,6 @@ struct FeatureSet {
         "If enabled, indicates that the guest properly associates resources with "
         "guest OS handles and that the host resources can be immediately cleaned "
         "upon receiving resource clean up commands.",
-        &map,
-    };
-    FeatureInfo PlayStoreImage = {
-        "PlayStoreImage",
-        "If enabled, the guest image is using the play store image which has "
-        "additional requirements.",
         &map,
     };
     FeatureInfo RefCountPipe = {

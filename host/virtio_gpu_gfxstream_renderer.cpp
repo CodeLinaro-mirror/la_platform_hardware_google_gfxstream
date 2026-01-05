@@ -91,9 +91,6 @@ ParseGfxstreamFeatures(const int rendererFlags,
     GFXSTREAM_SET_FEATURE_ON_CONDITION(
         &features, NoDelayCloseColorBuffer, true);
     GFXSTREAM_SET_FEATURE_ON_CONDITION(
-        &features, PlayStoreImage,
-        !(rendererFlags & STREAM_RENDERER_FLAGS_USE_GLES_BIT));
-    GFXSTREAM_SET_FEATURE_ON_CONDITION(
         &features, RefCountPipe,
         /*Resources are ref counted via guest file objects.*/ false);
     GFXSTREAM_SET_FEATURE_ON_CONDITION(
@@ -197,35 +194,25 @@ GetGfxstreamFeatures(const int rendererFlags,
     return ParseGfxstreamFeatures(rendererFlags, rendererFeaturesString);
 }
 
-SelectedRenderer parse_renderer(std::string_view renderer) {
-    if (renderer == "host"sv || renderer == "on"sv) {
-        return SELECTED_RENDERER_HOST;
-    } else if (renderer == "off"sv) {
-        return SELECTED_RENDERER_OFF;
-    } else if (renderer == "guest"sv) {
-        return SELECTED_RENDERER_GUEST;
-    } else if (renderer == "mesa"sv) {
-        return SELECTED_RENDERER_MESA;
-    } else if (renderer == "swiftshader"sv) {
-        return SELECTED_RENDERER_SWIFTSHADER;
-    } else if (renderer == "angle"sv || renderer == "swangle"sv) {
-        return SELECTED_RENDERER_ANGLE;
-    } else if (renderer == "angle9"sv) {
-        return SELECTED_RENDERER_ANGLE9;
-    } else if (renderer == "swiftshader_indirect"sv) {
-        return SELECTED_RENDERER_SWIFTSHADER_INDIRECT;
-    } else if (renderer == "angle_indirect"sv || renderer == "swangle_indirect"sv) {
-        return SELECTED_RENDERER_ANGLE_INDIRECT;
-    } else if (renderer == "angle9_indirect"sv) {
-        return SELECTED_RENDERER_ANGLE9_INDIRECT;
-    } else {
-        return SELECTED_RENDERER_UNKNOWN;
-    }
-}
 
 // TODO(b/418238945): Remove this AEMU specific code if possible.
 void MaybeConfigureRenderer(gfxstream::RenderLib& rendererLibrary) {
     if (const std::string& s_renderer = gfxstream::base::getEnvironmentVariable("ANDROID_EMU_RENDERER"); !s_renderer.empty()) {
+
+        auto parse_renderer = [](std::string_view renderer) {
+            if (renderer == "host"sv || renderer == "on"sv) {
+                return SELECTED_RENDERER_HOST;
+            } else if (renderer == "swiftshader"sv || renderer == "swiftshader_indirect"sv) {
+                return SELECTED_RENDERER_SWIFTSHADER_INDIRECT;
+            } else if (renderer == "lavapipe"sv) {
+                return SELECTED_RENDERER_LAVAPIPE;
+            } else if (renderer == "swangle"sv || renderer == "swangle_indirect"sv) {
+                return SELECTED_RENDERER_ANGLE_INDIRECT;
+            } else {
+                return SELECTED_RENDERER_UNKNOWN;
+            }
+        };
+
         SelectedRenderer renderer = parse_renderer(s_renderer);
         if (renderer == SELECTED_RENDERER_UNKNOWN) {
             GFXSTREAM_FATAL("Unknown renderer specified in ANDROID_EMU_RENDERER envvar: ", s_renderer.c_str());
@@ -798,11 +785,13 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
     }
     gfxstream::host::FeatureSet features = std::move(*featuresOpt);
 
-    GFXSTREAM_INFO("Gfxstream features:");
-    for (const auto& [_, featureInfo] : features.map) {
-        GFXSTREAM_INFO("    %s: %s (%s)", featureInfo->name.c_str(),
-                       (featureInfo->enabled ? "enabled" : "disabled"),
-                       featureInfo->reason.c_str());
+    if (!features.MinimalLogging.enabled) {
+        GFXSTREAM_INFO("Gfxstream features:");
+        for (const auto& [_, featureInfo] : features.map) {
+            GFXSTREAM_INFO("    %s: %s (%s)", featureInfo->name.c_str(),
+                           (featureInfo->enabled ? "enabled" : "disabled"),
+                           featureInfo->reason.c_str());
+        }
     }
 
     gfxstream::host::InitializeTracing();

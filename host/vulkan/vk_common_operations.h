@@ -32,6 +32,7 @@
 #include "gfxstream/host/backend_callbacks.h"
 #include "gfxstream/host/external_object_manager.h"
 #include "gfxstream/host/features.h"
+#include "gfxstream/host/gfxstream_format.h"
 #include "gfxstream/host/GfxApiLogger.h"
 #include "gfxstream/host/RenderDoc.h"
 #include "gfxstream/host/vk_enums.h"
@@ -40,6 +41,7 @@
 #include "gfxstream/ThreadAnnotations.h"
 #include "goldfish_vk_private_defs.h"
 #include "host/framework_formats.h"
+#include "render-utils/Renderer.h"
 #include "vk_utils.h"
 
 #if defined(_WIN32)
@@ -118,6 +120,7 @@ class VkEmulation {
     bool supportsExternalFenceCapabilities() const;
     bool supportsSurfaces() const;
     bool supportsMoltenVk() const;
+    bool supportsPortabilityEnumeration() const;
 
     bool supportsGetPhysicalDeviceProperties2() const;
 
@@ -212,10 +215,9 @@ class VkEmulation {
                                                                             VkImageTiling tiling,
                                                                             uint32_t mipLevels);
 
-    bool isFormatSupported(GLenum format);
+    bool isFormatSupported(GfxstreamFormat format);
 
-    bool createVkColorBuffer(uint32_t width, uint32_t height, GLenum format,
-                             FrameworkFormat frameworkFormat, uint32_t colorBufferHandle,
+    bool createVkColorBuffer(uint32_t width, uint32_t height, GfxstreamFormat format, uint32_t colorBufferHandle,
                              bool vulkanOnly, uint32_t memoryProperty, uint32_t mipLevels);
 
     bool teardownVkColorBuffer(uint32_t colorBufferHandle);
@@ -311,14 +313,14 @@ class VkEmulation {
         ExternalMemoryInfo memory;
 
         uint32_t handle;
-
-        /* Set in create(), before initialize() */
         uint32_t width;
         uint32_t height;
-        GLenum internalFormat;
+        GfxstreamFormat format;
+        // May be different than `format` if the host Vulkan driver does not
+        // directly support `format` (e.g. emulating RGB888 with RGBA8888).
+        GfxstreamFormat internalFormat;
+
         uint32_t memoryProperty;
-        int frameworkFormat;
-        int frameworkStride;
         bool initialized = false;
 
         VkImage image = VK_NULL_HANDLE;
@@ -372,6 +374,10 @@ class VkEmulation {
     bool readColorBufferToBytes(uint32_t colorBufferHandle, std::vector<uint8_t>* bytes);
     bool readColorBufferToBytes(uint32_t colorBufferHandle, uint32_t x, uint32_t y, uint32_t w,
                                 uint32_t h, void* outPixels, uint64_t outPixelsSize);
+    bool readColorBufferPixelsScaled(uint32_t colorBufferHandle, int pixelsWidth, int pixelsHeight,
+                                     GFXSTREAM_ROTATION pixelsRotation, const Rect& rect,
+                                     GfxstreamFormat pixelsFormat, void* outPixels,
+                                     const std::optional<std::array<float, 16>>& colorTransform);
 
     bool updateColorBufferFromBytes(uint32_t colorBufferHandle, const std::vector<uint8_t>& bytes);
     bool updateColorBufferFromBytes(uint32_t colorBufferHandle, uint32_t x, uint32_t y, uint32_t w,
@@ -495,8 +501,6 @@ class VkEmulation {
 
     int getSelectedGpuIndex(const std::vector<DeviceSupportInfo>& deviceInfos);
 
-    bool isFormatVulkanCompatible(GLenum internalFormat);
-
     bool getColorBufferAllocationInfoLocked(uint32_t colorBufferHandle, VkDeviceSize* outSize,
                                             uint32_t* outMemoryTypeIndex,
                                             bool* outMemoryIsDedicatedAlloc, void** outMappedPtr)
@@ -506,8 +510,11 @@ class VkEmulation {
         VkFormat format, uint32_t width, uint32_t height, VkImageTiling tiling, uint32_t mipLevels)
         REQUIRES(mMutex);
 
-    bool createVkColorBufferLocked(uint32_t width, uint32_t height, GLenum internalFormat,
-                                   FrameworkFormat frameworkFormat, uint32_t colorBufferHandle,
+    std::optional<GfxstreamFormat> GetInternalFormatLocked(GfxstreamFormat format)
+        REQUIRES(mMutex);
+
+    bool createVkColorBufferLocked(uint32_t width, uint32_t height, GfxstreamFormat format,
+                                   uint32_t colorBufferHandle,
                                    bool vulkanOnly, uint32_t memoryProperty, uint32_t mipLevels)
         REQUIRES(mMutex);
 
@@ -529,6 +536,15 @@ class VkEmulation {
     std::tuple<VkCommandBuffer, VkFence> allocateQueueTransferCommandBufferLocked() REQUIRES(mMutex);
 
     void freeExternalMemoryLocked(VulkanDispatch* vk, ExternalMemoryInfo* info) REQUIRES(mMutex);
+
+    bool readColorBufferPixelsScaledGpu(uint32_t colorBufferHandle, int pixelsWidth,
+                                        int pixelsHeight, GFXSTREAM_ROTATION pixelsRotation,
+                                        const Rect& rect, GfxstreamFormat pixelsFormat,
+                                        void* outPixels, const std::optional<std::array<float, 16>>& colorTransform);
+    bool readColorBufferPixelsScaledCpu(uint32_t colorBufferHandle, int pixelsWidth,
+                                        int pixelsHeight, GFXSTREAM_ROTATION pixelsRotation,
+                                        const Rect& rect, GfxstreamFormat pixelsFormat,
+                                        void* outPixels, const std::optional<std::array<float, 16>>& colorTransform);
 
     std::mutex mMutex;
 
@@ -587,8 +603,10 @@ class VkEmulation {
     bool mInstanceSupportsSurface = false;
 #if defined(__APPLE__)
     bool mInstanceSupportsMoltenVK = false;
+    bool mInstanceSupportsPortabilityEnumeration = false;
 #else
     static const bool mInstanceSupportsMoltenVK = false;
+    static const bool mInstanceSupportsPortabilityEnumeration = false;
 #endif
 
     PFN_vkGetPhysicalDeviceImageFormatProperties2KHR mGetImageFormatProperties2Func = nullptr;
