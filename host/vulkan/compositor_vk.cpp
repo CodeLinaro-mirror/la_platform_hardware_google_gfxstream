@@ -488,7 +488,7 @@ void CompositorVk::setUpDescriptorSets() {
         },
         VkDescriptorPoolSize{
             .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = descriptorSetsTotal,
+            .descriptorCount = descriptorSetsTotal * 2,
         }};
     const VkDescriptorPoolCreateInfo descriptorPoolCi = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -528,7 +528,7 @@ void CompositorVk::setUpDescriptorSets() {
                 .offset = bufferOffset,
                 .range = sizeof(UniformBufferBinding),
             };
-            descriptorSetWrites[layerIndex] = {
+            descriptorSetWrites[layerIndex] = VkWriteDescriptorSet{
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = frameDescriptorSets[layerIndex],
                 .dstBinding = 1,
@@ -1784,7 +1784,7 @@ void CompositorVk::drawImage(const ImageDrawParams& params, VkImageView imageVie
             .offset = bufferOffset,
             .range = sizeof(UniformBufferBinding),
         };
-        descriptorWrites[1] = {
+        descriptorWrites[1] = VkWriteDescriptorSet{
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = descriptorSet,
             .dstBinding = 1,
