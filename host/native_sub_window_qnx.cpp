@@ -14,11 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-#include <errno.h>
+#include <pthread.h>
+#include <screen/screen.h>
 
 #include "native_sub_window.h"
-#include "platform_helper_qnx.h"
+
+namespace {
+
+static pthread_once_t once_control = PTHREAD_ONCE_INIT;
+static screen_context_t g_screen_ctx;
+
+static void screen_init(void) {
+    /* initialize the global screen context */
+    screen_create_context(&g_screen_ctx, SCREEN_APPLICATION_CONTEXT);
+}
+
+static screen_context_t get_screen_context() {
+    pthread_once(&once_control, screen_init);
+    return g_screen_ctx;
+}
+
+}  // namespace
 
 EGLNativeWindowType createSubWindow(FBNativeWindowType p_window, int x, int y, int width,
                                     int height, float dpr,
@@ -28,7 +44,7 @@ EGLNativeWindowType createSubWindow(FBNativeWindowType p_window, int x, int y, i
     screen_window_t screen_window;
     int rc;
 
-    screen_ctx = gfxstream::qnx::getScreenContext();
+    screen_ctx = get_screen_context();
     if (screen_ctx == nullptr) {
         perror("No screen context");
         return nullptr;
@@ -109,7 +125,7 @@ int moveSubWindow(FBNativeWindowType p_parent_window, EGLNativeWindowType p_sub_
     if (screen_set_window_property_iv(p_sub_window, SCREEN_PROPERTY_SIZE, size)) {
         return 0;
     }
-    return screen_flush_context(gfxstream::qnx::getScreenContext(), 0) == EOK;
+    return screen_flush_context(get_screen_context(), 0) == EOK;
 }
 
 void* getNativeDisplay() {
