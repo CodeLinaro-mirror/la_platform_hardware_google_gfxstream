@@ -40,7 +40,7 @@
 #include "yuv_converter.h"
 
 #ifdef __APPLE__
-#include "gl/glestranslator/egl/egl_global_info.h"
+#include "glestranslator/egl/egl_global_info.h"
 #endif
 
 namespace gfxstream {

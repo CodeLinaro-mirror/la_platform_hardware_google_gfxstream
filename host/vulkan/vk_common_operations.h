@@ -23,8 +23,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "vulkan/vk_vvl_configuration.h"
-
 #include "color_buffer_vk.h"
 #include "compositor_vk.h"
 #include "debug_utils_helper.h"
@@ -46,6 +44,7 @@
 #include "render-utils/Renderer.h"
 #include "vk_format_support.h"
 #include "vk_utils.h"
+#include "vk_vvl_configuration.h"
 
 #if defined(_WIN32)
 typedef void* HANDLE;
