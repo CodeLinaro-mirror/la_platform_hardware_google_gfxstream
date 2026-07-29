@@ -341,6 +341,12 @@ struct BufferInfo {
     std::shared_ptr<bool> alive{new bool(true)};
 };
 
+struct BufferViewInfo {
+    VkDevice device;
+    VkBufferView boxed = VK_NULL_HANDLE;
+    std::shared_ptr<bool> alive{new bool(true)};
+};
+
 struct ImageInfo {
     VkDevice device;
     VkImage boxed = VK_NULL_HANDLE;
@@ -461,6 +467,29 @@ struct DescriptorSetLayoutInfo {
     VkDescriptorSetLayout boxed = 0;
     VkDescriptorSetLayoutCreateInfo createInfo;
     std::vector<VkDescriptorSetLayoutBinding> bindings;
+};
+
+struct DescriptorUpdateTemplateInfo {
+    VkDescriptorUpdateTemplateCreateInfo createInfo;
+    std::vector<VkDescriptorUpdateTemplateEntry> linearizedTemplateEntries;
+    // Preallocated pData
+    std::vector<uint8_t> data;
+
+    // Offset into `data` for the `VkDescriptorImageInfo`s.
+    size_t imageInfoStart = 0;
+    uint32_t imageInfoCount = 0;
+
+    // Offset into `data` for the `VkDescriptorBufferInfo`s.
+    size_t bufferInfoStart = 0;
+    uint32_t bufferInfoCount = 0;
+
+    // Offset into `data` for the `VkBufferView`s.
+    size_t bufferViewStart = 0;
+    uint32_t bufferViewCount = 0;
+
+    // Offset into `data` for the `VkWriteDescriptorSetInlineUniformBlockEXT`
+    size_t inlineUniformBlockStart = 0;
+    uint32_t inlineUniformBlockCount = 0;
 };
 
 struct DescriptorPoolInfo {
@@ -609,6 +638,7 @@ struct InstanceObjects {
         std::unordered_map<VkFramebuffer, FramebufferInfo> framebuffers;
         std::unordered_map<VkImage, ImageInfo> images;
         std::unordered_map<VkImageView, ImageViewInfo> imageViews;
+        std::unordered_map<VkBufferView, BufferViewInfo> bufferViews;
         std::unordered_map<VkPipeline, PipelineInfo> pipelines;
         std::unordered_map<VkPipelineCache, PipelineCacheInfo> pipelineCaches;
         std::unordered_map<VkPipelineLayout, PipelineLayoutInfo> pipelineLayouts;

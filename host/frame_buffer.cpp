@@ -757,16 +757,6 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
                                           int height, uint32_t format, uint32_t type,
                                           uint32_t texturesFormat, uint32_t* textures);
 
-    // Reads back the raw color buffer to |pixels|
-    // if |pixels| is not null.
-    // Always returns in |numBytes| how many bytes were
-    // planned to be transmitted.
-    // |numBytes| is not an input parameter;
-    // fewer or more bytes cannot be specified.
-    // If the framework format is YUV, it will read
-    // back as raw YUV data.
-    bool readColorBufferContents(HandleType p_colorbuffer, size_t* numBytes, void* pixels);
-
     void asyncWaitForGpuWithCb(uint64_t eglsync, FenceCompletionCallback cb);
 
     const gl::EGLDispatch* getEglDispatch();
@@ -3024,14 +3014,26 @@ int FrameBuffer::Impl::getScreenshot(unsigned int nChannels, unsigned int* width
         *height = screenHeight;
     }
 
-    int needed =
-        useSnipping ? (nChannels * rect.size.w * rect.size.h) : (nChannels * (*width) * (*height));
+    // Clamp to something the GL/Vk backends can actually allocate, and
+    // compute the byte count in 64-bit so a hostile desiredWidth/Height
+    // (poisoned via rcSetDisplayPose + unauthenticated gRPC) cannot wrap
+    // `needed` and bypass the size check below.
+    constexpr unsigned int kMaxScreenshotDim = 1 << 16;
+    if (*width  <= 0 || *width  > kMaxScreenshotDim ||
+        *height <= 0 || *height > kMaxScreenshotDim) {
+        *cPixels = 0;
+        return -1;
+    }
 
-    if (*cPixels < (size_t)needed) {
-        *cPixels = needed;
+    const uint64_t needed64 =
+        useSnipping ? (uint64_t)nChannels * rect.size.w * rect.size.h
+                    : (uint64_t)nChannels * (*width) * (*height);
+
+    if (needed64 > SIZE_MAX || *cPixels < (size_t)needed64) {
+        *cPixels = needed64;
         return Renderer::GET_SCREENSHOT_RESULT_PIXELS_SIZE;
     }
-    *cPixels = needed;
+    *cPixels = needed64;
     if (desiredRotation == GFXSTREAM_ROTATION_90 || desiredRotation == GFXSTREAM_ROTATION_270) {
         std::swap(*width, *height);
         std::swap(screenWidth, screenHeight);
@@ -3288,6 +3290,21 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
                        s->putBe32(pair.second.dpiY);
                    });
 
+    // Save display ids created through createDisplay
+    std::vector<uint32_t> displayIds;
+    int32_t currentId = -1;
+    uint32_t nextId;
+    while (get_gfxstream_multi_display_operations().get_next_display_info(
+        currentId, &nextId, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+        displayIds.push_back(nextId);
+        currentId = nextId;
+    }
+
+    stream->putBe32(displayIds.size());
+    for (uint32_t id : displayIds) {
+        stream->putBe32(id);
+    }
+
     stream->putBe32(m_useSubWindow);
     stream->putBe32(/*Obsolete m_eglContextInitialized =*/1);
 
@@ -3512,6 +3529,12 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                        int dpiY = static_cast<int>(s->getBe32());
                        return {idx, {w, h, dpiX, dpiY}};
                    });
+
+    uint32_t numDisplays = stream->getBe32();
+    for (uint32_t i = 0; i < numDisplays; ++i) {
+        uint32_t displayId = stream->getBe32();
+        get_gfxstream_multi_display_operations().create_display(&displayId);
+    }
 
     // TODO: resize the window
     //
@@ -4974,19 +4997,6 @@ void FrameBuffer::Impl::swapTexturesAndUpdateColorBuffer(uint32_t p_colorbuffer,
     }
 }
 
-bool FrameBuffer::Impl::readColorBufferContents(HandleType p_colorbuffer, size_t* numBytes,
-                                                void* pixels) {
-    AutoLock mutex(m_lock);
-
-    ColorBufferPtr colorBuffer = findColorBuffer(p_colorbuffer);
-    if (!colorBuffer) {
-        // bad colorbuffer handle
-        return false;
-    }
-
-    return colorBuffer->glOpReadContents(numBytes, pixels);
-}
-
 void FrameBuffer::Impl::asyncWaitForGpuWithCb(uint64_t eglsync, FenceCompletionCallback cb) {
     EmulatedEglFenceSync* fenceSync = EmulatedEglFenceSync::getFromHandle(eglsync);
 
@@ -5662,11 +5672,6 @@ void FrameBuffer::swapTexturesAndUpdateColorBuffer(uint32_t colorBufferHandle, i
                                                    uint32_t* textures) {
     mImpl->swapTexturesAndUpdateColorBuffer(colorBufferHandle, x, y, width, height, format, type,
                                             texturesFormat, textures);
-}
-
-bool FrameBuffer::readColorBufferContents(HandleType p_colorbuffer, size_t* numBytes,
-                                          void* pixels) {
-    return mImpl->readColorBufferContents(p_colorbuffer, numBytes, pixels);
 }
 
 void FrameBuffer::asyncWaitForGpuWithCb(uint64_t eglsync, FenceCompletionCallback cb) {
