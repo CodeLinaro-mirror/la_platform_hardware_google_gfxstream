@@ -5334,7 +5334,7 @@ std::unique_ptr<ColorBufferVkImageInfo> VkEmulation::prepareColorBufferForCompos
     compositorInfo->height = colorBufferInfo->imageCreateInfoShallow.extent.height;
     compositorInfo->image = colorBufferInfo->image;
     compositorInfo->imageView = colorBufferInfo->imageView;
-    compositorInfo->imageCreateInfo = colorBufferInfo->imageCreateInfoShallow;
+    compositorInfo->imageCreateInfoShallow = colorBufferInfo->imageCreateInfoShallow;
     compositorInfo->imageFormat = colorBufferInfo->format;
     compositorInfo->preBorrowLayout = colorBufferInfo->currentLayout;
     compositorInfo->preBorrowQueueFamilyIndex = colorBufferInfo->currentQueueFamilyIndex;
@@ -5376,7 +5376,7 @@ std::unique_ptr<ColorBufferVkImageInfo> VkEmulation::prepareColorBufferForDispla
     compositorInfo->height = colorBufferInfo->imageCreateInfoShallow.extent.height;
     compositorInfo->image = colorBufferInfo->image;
     compositorInfo->imageView = colorBufferInfo->imageView;
-    compositorInfo->imageCreateInfo = colorBufferInfo->imageCreateInfoShallow;
+    compositorInfo->imageCreateInfoShallow = colorBufferInfo->imageCreateInfoShallow;
     compositorInfo->imageFormat = colorBufferInfo->format;
     compositorInfo->preBorrowLayout = colorBufferInfo->currentLayout;
     compositorInfo->preBorrowQueueFamilyIndex = mQueueFamilyIndex;
