@@ -22,6 +22,7 @@
 #include "gfxstream/host/gfxstream_format.h"
 #include "vulkan/color_buffer_vk.h"
 #include "vulkan/vk_common_operations.h"
+#include <cinttypes>
 
 namespace gfxstream {
 namespace host {
@@ -62,7 +63,7 @@ class ColorBuffer::Impl : public LazySnapshotObj<ColorBuffer::Impl> {
     static std::unique_ptr<Impl> onLoad(gl::EmulationGl* emulationGl, vk::VkEmulation* emulationVk,
                                         gfxstream::Stream* stream);
 
-    void onSave(gfxstream::Stream* stream);
+    bool onSave(gfxstream::Stream* stream);
     void restore();
 
     HandleType getHndl() const { return mHandle; }
@@ -199,7 +200,10 @@ std::unique_ptr<ColorBuffer::Impl> ColorBuffer::Impl::create(
         auto behavior = colorBuffer->mGlAndVkAreSharingExternalMemory
                             ? vk::LoadImageBehavior::SkipImageContent
                             : vk::LoadImageBehavior::LoadImageContent;
-        colorBuffer->mColorBufferVk->onLoad(stream, behavior);
+        if (!colorBuffer->mColorBufferVk->onLoad(stream, behavior)) {
+            GFXSTREAM_ERROR("ColorBufferVk could not be loaded");
+            return nullptr;
+        }
     }
 
     return colorBuffer;
@@ -224,10 +228,16 @@ std::unique_ptr<ColorBuffer::Impl> ColorBuffer::Impl::onLoad(gl::EmulationGl* em
     std::unique_ptr<Impl> colorBuffer =
         Impl::create(emulationGl, emulationVk, width, height, format, handle, stream);
 
+    if (stream->hasErrors()) {
+        GFXSTREAM_ERROR("ColorBuffer::Impl::onLoad failed due to stream errors: %s",
+                        stream->getErrors().value_or("unknown error").c_str());
+        return nullptr;
+    }
+
     return colorBuffer;
 }
 
-void ColorBuffer::Impl::onSave(gfxstream::Stream* stream) {
+bool ColorBuffer::Impl::onSave(gfxstream::Stream* stream) {
     GFXSTREAM_DEBUG("snapshot save: color buffer %u, (%ux%u %s)", getHndl(), mWidth, mHeight,
                     ToString(mFormat).c_str());
 
@@ -237,16 +247,27 @@ void ColorBuffer::Impl::onSave(gfxstream::Stream* stream) {
     stream->putBe32(mHeight);
     stream->putBe32(GfxstreamFormatToUint32(mFormat));
 
+    if (mFormat == GfxstreamFormat::UNKNOWN) {
+        GFXSTREAM_ERROR("Colorbuffer save failed, unknown format");
+        return false;
+    }
+
 #if GFXSTREAM_ENABLE_HOST_GLES
     if (mColorBufferGl) {
-        mColorBufferGl->onSave(stream);
+        if (!mColorBufferGl->onSave(stream)) {
+            return false;
+        }
     }
 #endif
     if (mColorBufferVk) {
         auto behavior = mGlAndVkAreSharingExternalMemory ? vk::SaveImageBehavior::SkipImageContent
                                                          : vk::SaveImageBehavior::SaveImageContent;
-        mColorBufferVk->onSave(stream, behavior);
+        if (!mColorBufferVk->onSave(stream, behavior)) {
+            return false;
+        }
     }
+
+    return true;
 }
 
 void ColorBuffer::Impl::restore() {
@@ -494,9 +515,14 @@ std::shared_ptr<ColorBuffer> ColorBuffer::create(gl::EmulationGl* emulationGl,
                                                  HandleType handle, gfxstream::Stream* stream) {
     std::shared_ptr<ColorBuffer> colorbuffer(new ColorBuffer());
 
-    colorbuffer->mImpl =
-        ColorBuffer::Impl::create(emulationGl, emulationVk, width, height, format, handle, stream);
+    colorbuffer->mImpl = ColorBuffer::Impl::create(emulationGl, emulationVk, width, height, format,
+                                                   handle, stream);
     if (!colorbuffer->mImpl) {
+        return nullptr;
+    }
+    if (stream && stream->hasErrors()) {
+        GFXSTREAM_ERROR("ColorBuffer::create failed due to stream errors: %s",
+                        stream->getErrors().value_or("unknown error").c_str());
         return nullptr;
     }
 
@@ -513,12 +539,19 @@ std::shared_ptr<ColorBuffer> ColorBuffer::onLoad(gl::EmulationGl* emulationGl,
     if (!colorbuffer->mImpl) {
         return nullptr;
     }
+    if (stream && stream->hasErrors()) {
+        GFXSTREAM_ERROR("ColorBuffer::onLoad failed due to stream errors: %s",
+                        stream->getErrors().value_or("unknown error").c_str());
+        return nullptr;
+    }
     colorbuffer->mNeedRestore = true;
 
     return colorbuffer;
 }
 
-void ColorBuffer::onSave(gfxstream::Stream* stream) { mImpl->onSave(stream); }
+bool ColorBuffer::onSave(gfxstream::Stream* stream) {
+    return mImpl->onSave(stream);
+}
 
 void ColorBuffer::restore() { mImpl->touch(); }
 
