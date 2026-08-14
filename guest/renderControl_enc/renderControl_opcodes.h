@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -89,7 +89,9 @@
 #define OP_rcGetHostExtensionsString 					10069
 #define OP_rcGetDisplayColorTransform 					10070
 #define OP_rcSetDisplayColorTransform 					10071
-#define OP_last 					10072
+#define OP_rcSetDisplayPowerMode 					10072
+#define OP_rcGetDisplayPowerMode 					10073
+#define OP_last 					10074
 
 
 #endif

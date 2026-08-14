@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -96,6 +96,8 @@ struct renderControl_server_context_t {
 	rcGetHostExtensionsString_server_proc_t rcGetHostExtensionsString;
 	rcGetDisplayColorTransform_server_proc_t rcGetDisplayColorTransform;
 	rcSetDisplayColorTransform_server_proc_t rcSetDisplayColorTransform;
+	rcSetDisplayPowerMode_server_proc_t rcSetDisplayPowerMode;
+	rcGetDisplayPowerMode_server_proc_t rcGetDisplayPowerMode;
 	virtual ~renderControl_server_context_t() {}
 	int initDispatchByName( void *(*getProc)(const char *name, void *userData), void *userData);
 };

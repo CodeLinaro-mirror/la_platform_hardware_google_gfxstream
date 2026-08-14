@@ -21,6 +21,7 @@
 #include <time.h>
 
 #include <iomanip>
+#include <optional>
 
 #if defined(__linux__)
 #include <sys/resource.h>
@@ -128,6 +129,16 @@ bool postOnlyOnMainThread() {
 }
 
 static FrameBuffer* sFrameBuffer = NULL;
+
+// Limit number of resources for validation and consistency checks
+static constexpr uint32_t kNumMaxProcessResources = 5000;
+static constexpr uint32_t kNumMaxColorBuffers = 16000;
+
+// Version and magic numbers for framebuffer stream for validity checks.
+// The global snapshot version (e.g. kVersionBase for AEMU) should be updated when changing
+// the framebuffer version to avoid getting errors when loading old, unsupported snapshots.
+static constexpr uint32_t kFramebufferSnapshotVersionNumber = 2;
+static constexpr uint32_t kFramebufferSnapshotMagicNumber = 0xC0FFEEEE;
 
 // A condition variable needed to wait for framebuffer initialization.
 struct InitializedGlobals {
@@ -345,6 +356,13 @@ typedef std::unordered_map<uint64_t, gl::EmulatedEglContextSet> ProcOwnedEmulate
 typedef std::unordered_map<uint64_t, gl::EmulatedEglImageSet> ProcOwnedEmulatedEGLImages;
 #endif  // GFXSTREAM_ENABLE_HOST_GLES
 
+struct ReferenceCountedColorBuffer {
+    ColorBufferPtr cb;
+    uint32_t refcount;  // number of client-side references
+    bool opened;
+    uint64_t closedTs;
+};
+
 typedef std::unordered_map<HandleType, BufferRef> BufferMap;
 typedef std::unordered_multiset<HandleType> BufferSet;
 typedef std::unordered_map<uint64_t, BufferSet> ProcOwnedBuffers;
@@ -493,7 +511,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     bool onSave(gfxstream::Stream* stream, const ITextureSaverPtr& textureSaver);
     bool onLoad(gfxstream::Stream* stream, const ITextureLoaderPtr& textureLoader);
 
-    // lock and unlock handles (EmulatedEglContext, ColorBuffer, EmulatedEglWindowSurface)
+    // lock and unlock handles (EmulatedEglContext, ColorBuffer,
+    // EmulatedEglWindowSurface)
     void lock() ACQUIRE(m_lock);
     void unlock() RELEASE(m_lock);
 
@@ -565,6 +584,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
                        uint32_t dpi = 0);
     int getDisplayColorTransform(uint32_t displayId, float outColorTransform[16]);
     int setDisplayColorTransform(uint32_t displayId, const float colorTransform[16]);
+    int getDisplayPowerMode(uint32_t displayId, uint32_t* powerMode);
+    int setDisplayPowerMode(uint32_t displayId, uint32_t powerMode);
     void getCombinedDisplaySize(int* w, int* h);
 
     HandleType getLastPostedColorBuffer() { return m_lastPostedColorBuffer; }
@@ -805,7 +826,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     // Returns the set of ColorBuffers destroyed (for further cleanup)
     std::vector<HandleType> cleanupProcGLObjects_locked(uint64_t puid, bool forced = false);
 
-    void markOpened(ColorBufferRef* cbRef);
+    void markOpened(ReferenceCountedColorBuffer* cbRef);
     // Returns true if the color buffer was erased.
     bool closeColorBufferLocked(HandleType p_colorbuffer, bool forced = false);
     // Returns true if this was the last ref and we need to destroy stuff.
@@ -862,7 +883,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     uint64_t mFrameNumber = 0;
     FBNativeWindowType m_nativeWindow = 0;
 
-    ColorBufferMap m_colorbuffers;
+    std::unordered_map<HandleType, ReferenceCountedColorBuffer> m_colorbuffers;
     BufferMap m_buffers;
 
     // A collection of color buffers that were closed without any usages
@@ -2163,13 +2184,14 @@ bool FrameBuffer::Impl::createColorBufferWithResourceHandleLocked(int p_width, i
     // Explicitly set refcount to 1 to avoid the colorbuffer being added to
     // m_colorBufferDelayedCloseList in FrameBuffer::Impl::onLoad().
     if (m_refCountPipeEnabled) {
-        m_colorbuffers.try_emplace(handle, ColorBufferRef{std::move(cb), 1, false, 0});
+        m_colorbuffers.try_emplace(handle, ReferenceCountedColorBuffer{std::move(cb), 1, false, 0});
     } else {
         const int apiLevel = get_gfxstream_guest_android_api_level();
         // pre-O and post-O use different color buffer memory management
         // logic
         if (apiLevel > 0 && apiLevel < 26) {
-            m_colorbuffers.try_emplace(handle, ColorBufferRef{std::move(cb), 1, false, 0});
+            m_colorbuffers.try_emplace(handle,
+                                       ReferenceCountedColorBuffer{std::move(cb), 1, false, 0});
 
             RenderThreadInfo* tInfo = RenderThreadInfo::get();
             uint64_t puid = tInfo->m_puid;
@@ -2178,7 +2200,8 @@ bool FrameBuffer::Impl::createColorBufferWithResourceHandleLocked(int p_width, i
             }
 
         } else {
-            m_colorbuffers.try_emplace(handle, ColorBufferRef{std::move(cb), 0, false, 0});
+            m_colorbuffers.try_emplace(handle,
+                                       ReferenceCountedColorBuffer{std::move(cb), 0, false, 0});
         }
     }
 
@@ -2230,10 +2253,9 @@ int FrameBuffer::Impl::openColorBuffer(HandleType p_colorbuffer) {
 
     AutoLock mutex(m_lock);
 
-    ColorBufferMap::iterator c;
     {
         AutoLock colorBuffermapLock(m_colorBufferMapLock);
-        c = m_colorbuffers.find(p_colorbuffer);
+        auto c = m_colorbuffers.find(p_colorbuffer);
         if (c == m_colorbuffers.end()) {
             // bad colorbuffer handle
             GFXSTREAM_ERROR("FB: openColorBuffer cb handle %d not found", p_colorbuffer);
@@ -2305,7 +2327,7 @@ bool FrameBuffer::Impl::closeColorBufferLocked(HandleType p_colorbuffer, bool fo
 
         if (m_noDelayCloseColorBufferEnabled) forced = true;
 
-        ColorBufferMap::iterator c(m_colorbuffers.find(p_colorbuffer));
+        auto c = m_colorbuffers.find(p_colorbuffer);
         if (c == m_colorbuffers.end()) {
             // This is harmless: it is normal for guest system to issue
             // closeColorBuffer command when the color buffer is already
@@ -2340,7 +2362,7 @@ bool FrameBuffer::Impl::closeColorBufferLocked(HandleType p_colorbuffer, bool fo
 void FrameBuffer::Impl::decColorBufferRefCountNoDestroy(HandleType p_colorbuffer) {
     AutoLock colorBufferMapLock(m_colorBufferMapLock);
 
-    ColorBufferMap::iterator c(m_colorbuffers.find(p_colorbuffer));
+    auto c = m_colorbuffers.find(p_colorbuffer);
     if (c == m_colorbuffers.end()) {
         return;
     }
@@ -2407,16 +2429,17 @@ void FrameBuffer::Impl::createGraphicsProcessResources(uint64_t puid) {
 }
 
 std::unique_ptr<ProcessResources> FrameBuffer::Impl::removeGraphicsProcessResources(uint64_t puid) {
-    std::unordered_map<uint64_t, std::unique_ptr<ProcessResources>>::node_type node;
+    std::unique_ptr<ProcessResources> res;
     {
         AutoLock mutex(m_procOwnedResourcesLock);
-        node = m_procOwnedResources.extract(puid);
+        if (auto node = m_procOwnedResources.extract(puid)) {
+            res = std::move(node.mapped());
+        }
     }
-    if (node.empty()) {
+    if (!res) {
         GFXSTREAM_WARNING("Failed to find process resource for puid %" PRIu64 ".", puid);
         return nullptr;
     }
-    std::unique_ptr<ProcessResources> res = std::move(node.mapped());
     return res;
 }
 
@@ -2545,7 +2568,7 @@ std::vector<HandleType> FrameBuffer::Impl::cleanupProcGLObjects_locked(uint64_t 
     return colorBuffersToCleanup;
 }
 
-void FrameBuffer::Impl::markOpened(ColorBufferRef* cbRef) {
+void FrameBuffer::Impl::markOpened(ReferenceCountedColorBuffer* cbRef) {
     cbRef->opened = true;
     eraseDelayedCloseColorBufferLocked(cbRef->cb->getHndl(), cbRef->closedTs);
     cbRef->closedTs = 0;
@@ -2713,7 +2736,7 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
     ColorBufferPtr colorBuffer = nullptr;
     {
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
-        ColorBufferMap::iterator c = m_colorbuffers.find(p_colorbuffer);
+        auto c = m_colorbuffers.find(p_colorbuffer);
         if (c != m_colorbuffers.end()) {
             colorBuffer = c->second.cb;
             c->second.refcount++;
@@ -3246,6 +3269,7 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
     AutoLock mutex(m_lock);
 
     GFXSTREAM_DEBUG("snapshot save: save framebuffer");
+    stream->putBe32(kFramebufferSnapshotVersionNumber);
 
     std::unique_ptr<RecursiveScopedContextBind> bind;
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -3326,15 +3350,21 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
 
     {
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
-        GFXSTREAM_DEBUG("snapshot save: save %zu color buffers", m_colorbuffers.size());
+        const size_t colorBufferCount = m_colorbuffers.size();
+        if (colorBufferCount > kNumMaxColorBuffers) {
+            GFXSTREAM_ERROR("snapshot save: too many color buffers: %zu", colorBufferCount);
+            return false;
+        }
+        GFXSTREAM_DEBUG("snapshot save: save %zu color buffers", colorBufferCount);
         stream->putByte(m_guestManagedColorBufferLifetime);
-        saveCollection(stream, m_colorbuffers,
-                       [now](Stream* s, const ColorBufferMap::value_type& pair) {
-                           pair.second.cb->onSave(s);
-                           s->putBe32(pair.second.refcount);
-                           s->putByte(pair.second.opened);
-                           s->putBe32(std::max<uint64_t>(0, now - pair.second.closedTs));
-                       });
+        saveCollection(stream, m_colorbuffers, [now](Stream* s, const auto& pair) {
+            auto cb = pair.second.cb;
+            assert(cb);
+            cb->onSave(s);
+            s->putBe32(pair.second.refcount);
+            s->putByte(pair.second.opened);
+            s->putBe32(std::max<uint64_t>(0, now - pair.second.closedTs));
+        });
     }
     stream->putBe32(m_lastPostedColorBuffer);
 #if GFXSTREAM_ENABLE_HOST_GLES
@@ -3355,10 +3385,17 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
     saveProcOwnedCollection(stream, m_procOwnedEmulatedEglContexts);
 #endif
 
-    // TODO(b/309858017): remove if when ready to bump snapshot version
-    if (m_features.VulkanSnapshots.enabled()) {
+    // save process owned resources
+    {
         AutoLock procResourceLock(m_procOwnedResourcesLock);
-        stream->putBe64(m_procOwnedResources.size());
+        size_t procResourceCount = m_procOwnedResources.size();
+        if (procResourceCount > kNumMaxProcessResources) {
+            GFXSTREAM_ERROR("snapshot save: too many process owned resources: %zu",
+                            procResourceCount);
+            return false;
+        }
+        GFXSTREAM_DEBUG("snapshot save: save %zu process owned resources", procResourceCount);
+        stream->putBe64(procResourceCount);
         for (const auto& element : m_procOwnedResources) {
             stream->putBe64(element.first);
             stream->putBe32(element.second->getSequenceNumberPtr()->load());
@@ -3390,6 +3427,10 @@ bool FrameBuffer::Impl::onSave(Stream* stream, const ITextureSaverPtr& textureSa
         EmulatedEglFenceSync::onSave(stream);
     }
 #endif
+
+    // Finish with a magic number to be able to verify load later on.
+    stream->putBe32(kFramebufferSnapshotMagicNumber);
+
     return true;
 }
 
@@ -3397,6 +3438,14 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
     AutoLock lock(m_lock);
 
     GFXSTREAM_DEBUG("snapshot load: load framebuffer");
+    const uint32_t versionSaved = stream->getBe32();
+    if (versionSaved != kFramebufferSnapshotVersionNumber) {
+        // The global snapshot version should be updated when changing the version for the
+        // framebuffer here in order to avoid this situation.
+        GFXSTREAM_ERROR("Unsupported snapshot version: 0x%x (Version supported: 0x%x)",
+                        versionSaved, kFramebufferSnapshotVersionNumber);
+        return false;
+    }
 
     // cleanups
     {
@@ -3507,7 +3556,6 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                 GFXSTREAM_ERROR("warning: on load, stale colorbuffers: %zu", m_colorbuffers.size());
                 m_colorbuffers.clear();
             }
-            assert(m_colorbuffers.empty());
         }
 #if GFXSTREAM_ENABLE_HOST_GLES
         if (m_emulationGl) {
@@ -3567,12 +3615,14 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
         GFXSTREAM_DEBUG("snapshot load: load color buffers");
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
         m_guestManagedColorBufferLifetime = stream->getByte();
-        loadCollection(
-            stream, &m_colorbuffers, [this, now](Stream* stream) -> ColorBufferMap::value_type {
+        bool colorBuffersLoaded = tryLoadCollection(
+            stream, &m_colorbuffers, kNumMaxColorBuffers,
+            [this, now](Stream* stream) -> std::optional<std::pair<HandleType, ReferenceCountedColorBuffer>> {
                 ColorBufferPtr cb =
                     ColorBuffer::onLoad(m_emulationGl.get(), m_emulationVk.get(), stream);
                 if (!cb) {
-                    GFXSTREAM_FATAL("Cannot load color buffer for the snapshot!");
+                    GFXSTREAM_ERROR("Cannot load color buffer for the snapshot!");
+                    return std::nullopt;
                 }
                 const HandleType handle = cb->getHndl();
                 const unsigned refCount = stream->getBe32();
@@ -3581,8 +3631,14 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
                 if (refCount == 0) {
                     m_colorBufferDelayedCloseList.push_back({closedTs, handle});
                 }
-                return {handle, ColorBufferRef{std::move(cb), refCount, opened, closedTs}};
+                return std::make_optional(std::make_pair(
+                    handle, ReferenceCountedColorBuffer{std::move(cb), refCount, opened, closedTs}));
             });
+
+        if (!colorBuffersLoaded) {
+            GFXSTREAM_ERROR("snapshot load: could not load color buffers");
+            return false;
+        }
         GFXSTREAM_DEBUG("snapshot load: %zu color buffers loaded", m_colorbuffers.size());
     }
     m_lastPostedColorBuffer = static_cast<HandleType>(stream->getBe32());
@@ -3594,8 +3650,14 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
         loadCollection(
             stream, &m_windows, [this](Stream* stream) -> EmulatedEglWindowSurfaceMap::value_type {
                 ENSURE_GL_EMULATION_FATAL();
-                auto window =
-                    m_emulationGl->loadEmulatedEglWindowSurface(stream, m_colorbuffers, m_contexts);
+                auto window = m_emulationGl->loadEmulatedEglWindowSurface(
+                    stream,
+                    [this](uint32_t handle) -> IColorBufferRef {
+                        auto it = m_colorbuffers.find(handle);
+                        if (it == m_colorbuffers.end()) return nullptr;
+                        return it->second.cb;
+                    },
+                    m_contexts);
 
                 HandleType handle = window->getHndl();
                 HandleType colorBufferHandle = stream->getBe32();
@@ -3613,10 +3675,16 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
     loadProcOwnedCollection(stream, &m_procOwnedEmulatedEglImages);
     loadProcOwnedCollection(stream, &m_procOwnedEmulatedEglContexts);
 #endif
-    // TODO(b/309858017): remove if when ready to bump snapshot version
-    if (m_features.VulkanSnapshots.enabled()) {
-        size_t resourceCount = stream->getBe64();
-        for (size_t i = 0; i < resourceCount; i++) {
+
+    // load process owned resources
+    {
+        uint64_t resourceCount = stream->getBe64();
+        if (resourceCount > kNumMaxProcessResources) {
+            GFXSTREAM_ERROR("%s:%d - too many process resources in snapshot: %" PRIu64, __func__,
+                            __LINE__, resourceCount);
+            return false;
+        }
+        for (uint64_t i = 0; i < resourceCount; i++) {
             uint64_t puid = stream->getBe64();
             uint32_t sequenceNumber = stream->getBe32();
             std::unique_ptr<ProcessResources> processResources = ProcessResources::create();
@@ -3676,6 +3744,14 @@ bool FrameBuffer::Impl::onLoad(Stream* stream, const ITextureLoaderPtr& textureL
     }
 #endif
 
+    // Check if the stream is read correctly by checking a magic number at the end of the stream.
+    uint32_t magicNumberLoaded = stream->getBe32();
+    if (magicNumberLoaded != kFramebufferSnapshotMagicNumber) {
+        GFXSTREAM_ERROR("%s:%d - framebuffer snapshot magic number mismatch: 0x%x", __func__,
+                        __LINE__, magicNumberLoaded);
+        return false;
+    }
+
     GFXSTREAM_DEBUG("snapshot load: framebuffer loaded successfully");
 
     return true;
@@ -3688,11 +3764,11 @@ void FrameBuffer::Impl::unlock() { m_lock.unlock(); }
 
 ColorBufferPtr FrameBuffer::Impl::findColorBuffer(HandleType p_colorbuffer) {
     AutoLock colorBufferMapLock(m_colorBufferMapLock);
-    ColorBufferMap::iterator c(m_colorbuffers.find(p_colorbuffer));
+    auto c = m_colorbuffers.find(p_colorbuffer);
     if (c == m_colorbuffers.end()) {
         return nullptr;
     } else {
-        return c->second.cb;
+        return std::dynamic_pointer_cast<ColorBuffer>(c->second.cb);
     }
 }
 
@@ -3790,6 +3866,15 @@ int FrameBuffer::Impl::setDisplayColorTransform(uint32_t displayId,
     return get_gfxstream_multi_display_operations().set_color_transform_matrix(displayId,
                                                                                colorTransform);
 }
+
+int FrameBuffer::Impl::getDisplayPowerMode(uint32_t displayId, uint32_t* powerMode) {
+    return get_gfxstream_multi_display_operations().get_display_power_mode(displayId, powerMode);
+}
+
+int FrameBuffer::Impl::setDisplayPowerMode(uint32_t displayId, uint32_t powerMode) {
+    return get_gfxstream_multi_display_operations().set_display_power_mode(displayId, powerMode);
+}
+
 
 void FrameBuffer::Impl::sweepColorBuffersLocked() {
     HandleType handleToDestroy = 0;
@@ -4168,7 +4253,7 @@ bool FrameBuffer::Impl::setEmulatedEglWindowSurfaceColorBuffer(HandleType p_surf
 
     {
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
-        ColorBufferMap::iterator c(m_colorbuffers.find(p_colorbuffer));
+        auto c = m_colorbuffers.find(p_colorbuffer);
         if (c == m_colorbuffers.end()) {
             GFXSTREAM_ERROR("bad color buffer handle %d", p_colorbuffer);
             // bad colorbuffer handle
@@ -4246,7 +4331,8 @@ HandleType FrameBuffer::Impl::createEmulatedEglContext(int config, HandleType sh
     ENSURE_GL_EMULATION_VALUE(0);
     AutoLock mutex(m_lock);
     gfxstream::base::AutoWriteLock contextLock(m_contextStructureLock);
-    // Hold the ColorBuffer map lock so that the new handle won't collide with a ColorBuffer handle.
+    // Hold the ColorBuffer map lock so that the new handle won't collide with a
+    // ColorBuffer handle.
     AutoLock colorBufferMapLock(m_colorBufferMapLock);
 
     EmulatedEglContextPtr shareContext = nullptr;
@@ -4316,7 +4402,8 @@ HandleType FrameBuffer::Impl::createEmulatedEglWindowSurface(int p_config, int p
                                                              int p_height) {
     ENSURE_GL_EMULATION_VALUE(0);
     AutoLock mutex(m_lock);
-    // Hold the ColorBuffer map lock so that the new handle won't collide with a ColorBuffer handle.
+    // Hold the ColorBuffer map lock so that the new handle won't collide with a
+    // ColorBuffer handle.
     AutoLock colorBufferMapLock(m_colorBufferMapLock);
 
     HandleType handle = genHandle_locked();
@@ -5430,6 +5517,15 @@ int FrameBuffer::getDisplayColorTransform(uint32_t displayId, float outColorTran
 int FrameBuffer::setDisplayColorTransform(uint32_t displayId, const float colorTransform[16]) {
     return mImpl->setDisplayColorTransform(displayId, colorTransform);
 }
+
+int FrameBuffer::getDisplayPowerMode(uint32_t displayId, uint32_t* powerMode) {
+    return mImpl->getDisplayPowerMode(displayId, powerMode);
+}
+
+int FrameBuffer::setDisplayPowerMode(uint32_t displayId, uint32_t powerMode) {
+    return mImpl->setDisplayPowerMode(displayId, powerMode);
+}
+
 
 HandleType FrameBuffer::getLastPostedColorBuffer() { return mImpl->getLastPostedColorBuffer(); }
 

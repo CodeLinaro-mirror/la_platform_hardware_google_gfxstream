@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -91,6 +91,8 @@ extern "C" {
 	int rcGetHostExtensionsString(uint32_t bufferSize, void* buffer);
 	int rcGetDisplayColorTransform(uint32_t displayId, mat4x4_ptr outColorTransformMatrix);
 	int rcSetDisplayColorTransform(uint32_t displayId, const mat4x4_ptr colorTransformMatrix);
+	int rcSetDisplayPowerMode(uint32_t displayId, uint32_t mode);
+	int rcGetDisplayPowerMode(uint32_t displayId, uint32_t* mode);
 };
 
 #ifndef GET_CONTEXT
@@ -529,5 +531,17 @@ int rcSetDisplayColorTransform(uint32_t displayId, const mat4x4_ptr colorTransfo
 {
 	GET_CONTEXT;
 	return ctx->rcSetDisplayColorTransform(ctx, displayId, colorTransformMatrix);
+}
+
+int rcSetDisplayPowerMode(uint32_t displayId, uint32_t mode)
+{
+	GET_CONTEXT;
+	return ctx->rcSetDisplayPowerMode(ctx, displayId, mode);
+}
+
+int rcGetDisplayPowerMode(uint32_t displayId, uint32_t* mode)
+{
+	GET_CONTEXT;
+	return ctx->rcGetDisplayPowerMode(ctx, displayId, mode);
 }
 

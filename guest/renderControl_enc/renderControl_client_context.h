@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -96,6 +96,8 @@ struct renderControl_client_context_t {
 	rcGetHostExtensionsString_client_proc_t rcGetHostExtensionsString;
 	rcGetDisplayColorTransform_client_proc_t rcGetDisplayColorTransform;
 	rcSetDisplayColorTransform_client_proc_t rcSetDisplayColorTransform;
+	rcSetDisplayPowerMode_client_proc_t rcSetDisplayPowerMode;
+	rcGetDisplayPowerMode_client_proc_t rcGetDisplayPowerMode;
 	virtual ~renderControl_client_context_t() {}
 
 	typedef renderControl_client_context_t *CONTEXT_ACCESSOR_TYPE(void);

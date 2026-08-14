@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -98,6 +98,8 @@ typedef void (renderControl_APIENTRY *rcSetProcessMetadata_client_proc_t) (void 
 typedef int (renderControl_APIENTRY *rcGetHostExtensionsString_client_proc_t) (void * ctx, uint32_t, void*);
 typedef int (renderControl_APIENTRY *rcGetDisplayColorTransform_client_proc_t) (void * ctx, uint32_t, mat4x4_ptr);
 typedef int (renderControl_APIENTRY *rcSetDisplayColorTransform_client_proc_t) (void * ctx, uint32_t, const mat4x4_ptr);
+typedef int (renderControl_APIENTRY *rcSetDisplayPowerMode_client_proc_t) (void * ctx, uint32_t, uint32_t);
+typedef int (renderControl_APIENTRY *rcGetDisplayPowerMode_client_proc_t) (void * ctx, uint32_t, uint32_t*);
 
 
 #endif

@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -23,11 +23,14 @@
 #include <stdlib.h>
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
+
+#include "vk_vvl_configuration.h"
 
 #include "debug_utils_helper.h"
 #include "device_op_tracker.h"
@@ -211,6 +214,8 @@ struct InstanceInfo {
     std::string applicationName;
     std::string engineName;
     uint32_t contextId = 0;
+    std::unique_ptr<VVLContext> debugContext;
+    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 };
 
 struct PhysicalDeviceInfo {

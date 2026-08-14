@@ -32,21 +32,21 @@
 #include "buffer.h"
 #include "color_buffer.h"
 #include "framework_formats.h"
-#include "handle.h"
-#include "post_commands.h"
-#include "vsync_thread.h"
 #include "gfxstream/AsyncResult.h"
 #include "gfxstream/EventNotificationSupport.h"
-#include "gfxstream/host/process_resources.h"
 #include "gfxstream/host/borrowed_image.h"
 #include "gfxstream/host/external_object_manager.h"
-#include "gfxstream/host/gl_enums.h"
 #include "gfxstream/host/gfxstream_format.h"
+#include "gfxstream/host/gl_enums.h"
+#include "gfxstream/host/process_resources.h"
 #include "gfxstream/host/vk_enums.h"
+#include "handle.h"
+#include "post_commands.h"
 #include "render-utils/Renderer.h"
 #include "render-utils/render_api.h"
 #include "render-utils/stream.h"
 #include "render-utils/virtio_gpu_ops.h"
+#include "vsync_thread.h"
 
 // values for 'param' argument of rcGetFBParam
 #define FB_WIDTH 1
@@ -389,6 +389,8 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
                        uint32_t dpi = 0);
     int getDisplayColorTransform(uint32_t displayId, float outColorTransform[16]);
     int setDisplayColorTransform(uint32_t displayId, const float colorTransform[16]);
+    int getDisplayPowerMode(uint32_t displayId, uint32_t* powerMode);
+    int setDisplayPowerMode(uint32_t displayId, uint32_t powerMode);
     struct DisplayInfo {
         uint32_t cb;
         int32_t pos_x;
