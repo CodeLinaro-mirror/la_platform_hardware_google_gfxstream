@@ -137,7 +137,7 @@ static constexpr uint32_t kNumMaxColorBuffers = 16000;
 // Version and magic numbers for framebuffer stream for validity checks.
 // The global snapshot version (e.g. kVersionBase for AEMU) should be updated when changing
 // the framebuffer version to avoid getting errors when loading old, unsupported snapshots.
-static constexpr uint32_t kFramebufferSnapshotVersionNumber = 1;
+static constexpr uint32_t kFramebufferSnapshotVersionNumber = 2;
 static constexpr uint32_t kFramebufferSnapshotMagicNumber = 0xC0FFEEEE;
 
 // A condition variable needed to wait for framebuffer initialization.
@@ -576,6 +576,8 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
                        uint32_t dpi = 0);
     int getDisplayColorTransform(uint32_t displayId, float outColorTransform[16]);
     int setDisplayColorTransform(uint32_t displayId, const float colorTransform[16]);
+    int getDisplayPowerMode(uint32_t displayId, uint32_t* powerMode);
+    int setDisplayPowerMode(uint32_t displayId, uint32_t powerMode);
     void getCombinedDisplaySize(int* w, int* h);
 
     HandleType getLastPostedColorBuffer() { return m_lastPostedColorBuffer; }
@@ -3849,6 +3851,15 @@ int FrameBuffer::Impl::setDisplayColorTransform(uint32_t displayId,
                                                                                colorTransform);
 }
 
+int FrameBuffer::Impl::getDisplayPowerMode(uint32_t displayId, uint32_t* powerMode) {
+    return get_gfxstream_multi_display_operations().get_display_power_mode(displayId, powerMode);
+}
+
+int FrameBuffer::Impl::setDisplayPowerMode(uint32_t displayId, uint32_t powerMode) {
+    return get_gfxstream_multi_display_operations().set_display_power_mode(displayId, powerMode);
+}
+
+
 void FrameBuffer::Impl::sweepColorBuffersLocked() {
     HandleType handleToDestroy = 0;
     while (mOutstandingColorBufferDestroys.tryReceive(&handleToDestroy)) {
@@ -5488,6 +5499,15 @@ int FrameBuffer::getDisplayColorTransform(uint32_t displayId, float outColorTran
 int FrameBuffer::setDisplayColorTransform(uint32_t displayId, const float colorTransform[16]) {
     return mImpl->setDisplayColorTransform(displayId, colorTransform);
 }
+
+int FrameBuffer::getDisplayPowerMode(uint32_t displayId, uint32_t* powerMode) {
+    return mImpl->getDisplayPowerMode(displayId, powerMode);
+}
+
+int FrameBuffer::setDisplayPowerMode(uint32_t displayId, uint32_t powerMode) {
+    return mImpl->setDisplayPowerMode(displayId, powerMode);
+}
+
 
 HandleType FrameBuffer::getLastPostedColorBuffer() { return mImpl->getLastPostedColorBuffer(); }
 
