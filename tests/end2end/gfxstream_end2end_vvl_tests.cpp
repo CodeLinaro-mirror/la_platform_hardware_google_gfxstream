@@ -63,7 +63,7 @@ class GfxstreamEnd2EndVvlTest : public GfxstreamEnd2EndTest {
             .initialLayout = vkhpp::ImageLayout::eUndefined,
         };
         auto image = device->createImageUnique(imageCreateInfo).value;
-        ASSERT_THAT(image, NotNull());
+        ASSERT_TRUE(image.get() != VK_NULL_HANDLE);
     }
 };
 
