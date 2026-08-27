@@ -456,6 +456,31 @@ TEST(VVLConfigurationTest, ExcludeFilterPrecedence) {
     EXPECT_TRUE(config.createDebugContext("TestApp", "No Engine") != nullptr);
 }
 
+TEST(VVLConfigurationTest, FilterWithoutExplicitBehaviorDefaultsToPrint) {
+    gfxstream::host::FeatureSet features;
+    features.VulkanValidationIncludeFilter.parseValue("com.example.game");
+    VVLConfiguration config = VVLConfiguration::parse(features);
+
+    EXPECT_EQ(config.getBehavior(), VVLBehavior::PrintOnly);
+    EXPECT_TRUE(config.createDebugContext("com.example.game", "No Engine") != nullptr);
+    EXPECT_FALSE(config.createDebugContext("other.app", "No Engine") != nullptr);
+}
+
+TEST(VVLConfigurationTest, FilterEnvironmentVariables) {
+    gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VVL_INCLUDE_FILTER", "com.env.include");
+    gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VVL_EXCLUDE_FILTER", "com.env.exclude");
+
+    gfxstream::host::FeatureSet features;
+    VVLConfiguration config = VVLConfiguration::parse(features);
+
+    EXPECT_EQ(config.getBehavior(), VVLBehavior::PrintOnly);
+    EXPECT_TRUE(config.createDebugContext("com.env.include", "No Engine") != nullptr);
+    EXPECT_FALSE(config.createDebugContext("com.env.exclude", "No Engine") != nullptr);
+
+    gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VVL_INCLUDE_FILTER", "");
+    gfxstream::base::setEnvironmentVariable("ANDROID_EMU_VVL_EXCLUDE_FILTER", "");
+}
+
 }  // namespace
 }  // namespace vk
 }  // namespace host

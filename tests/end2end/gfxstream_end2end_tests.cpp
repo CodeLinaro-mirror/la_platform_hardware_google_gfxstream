@@ -241,7 +241,11 @@ void GfxstreamEnd2EndTest::SetUp() {
     const std::string transportValue = GfxstreamTransportToEnvVar(params.with_transport);
     std::vector<std::string> featureEnables;
     for (const std::string& feature : params.with_features) {
-        featureEnables.push_back(feature + ":enabled");
+        if (feature.find(':') != std::string::npos) {
+            featureEnables.push_back(feature);
+        } else {
+            featureEnables.push_back(feature + ":enabled");
+        }
     }
 
     ASSERT_THAT(gfxstream::testing::SetupGraphicsTestEnvironment(), IsTrue())
