@@ -8,7 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresso or implied.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -96,6 +96,8 @@ int renderControl_server_context_t::initDispatchByName(void *(*getProc)(const ch
 	rcGetHostExtensionsString = (rcGetHostExtensionsString_server_proc_t) getProc("rcGetHostExtensionsString", userData);
 	rcGetDisplayColorTransform = (rcGetDisplayColorTransform_server_proc_t) getProc("rcGetDisplayColorTransform", userData);
 	rcSetDisplayColorTransform = (rcSetDisplayColorTransform_server_proc_t) getProc("rcSetDisplayColorTransform", userData);
+	rcSetDisplayPowerMode = (rcSetDisplayPowerMode_server_proc_t) getProc("rcSetDisplayPowerMode", userData);
+	rcGetDisplayPowerMode = (rcGetDisplayPowerMode_server_proc_t) getProc("rcGetDisplayPowerMode", userData);
 	return 0;
 }
 
