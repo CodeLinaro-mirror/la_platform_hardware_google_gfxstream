@@ -391,7 +391,7 @@ static void* sVulkanDispatchDlSym(void* lib, const char* sym) {
     return sVulkanDispatchImpl()->dlsym(lib, sym);
 }
 
-static void ensureVulkanValidationLayersEnabled() {
+void ensureVulkanValidationLayersEnabled() {
     GFXSTREAM_INFO("Enabling Vulkan validation layers.");
 
     // Our VkLayer_khronos_validation.json expects the VVL .so file to be present in the same directory.
@@ -487,7 +487,9 @@ void VulkanDispatchImpl::initialize(bool forTesting) {
 
     bool vvlRequested =
         !gfxstream::base::getEnvironmentVariable("GFXSTREAM_USE_TESTING_VALIDATION_LAYERS").empty() ||
-        !gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VVL_BEHAVIOR").empty();
+        !gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VVL_BEHAVIOR").empty() ||
+        !gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VVL_INCLUDE_FILTER").empty() ||
+        !gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VVL_EXCLUDE_FILTER").empty();
 
     if (vvlRequested) {
         ensureVulkanValidationLayersEnabled();
