@@ -1,4 +1,5 @@
 #include "vulkan/vk_vvl_configuration.h"
+#include "vulkan/vulkan_dispatch.h"
 
 #include <algorithm>
 #include <cctype>
@@ -39,11 +40,11 @@ VVLBehavior parseVVLBehaviorString(const std::string& modeStr) {
     }
     if (modeStr == "print") {
         return VVLBehavior::PrintOnly;
-    } else if (modeStr == "fail" || modeStr == "error") {
+    } else if (modeStr == "fail") {
         return VVLBehavior::Fail;
     } else if (modeStr == "crash") {
         return VVLBehavior::Crash;
-    } else if (modeStr == "off" || modeStr == "none") {
+    } else if (modeStr == "off") {
         return VVLBehavior::None;
     } else {
         GFXSTREAM_WARNING("Unknown Vulkan validation mode '%s', defaulting to off.",
@@ -100,18 +101,30 @@ VVLConfiguration VVLConfiguration::parse(const gfxstream::host::FeatureSet& feat
         }
     }
 
-    VVLBehavior behavior = parseVVLBehaviorString(valMode);
-
     std::unordered_set<std::string> includeFilters;
     auto includeOpt = features.VulkanValidationIncludeFilter.getValue();
     if (includeOpt && !includeOpt->empty()) {
         includeFilters = parseFilterList(*includeOpt);
+    } else if (const char* env = getenv("ANDROID_EMU_VVL_INCLUDE_FILTER")) {
+        includeFilters = parseFilterList(env);
     }
 
     std::unordered_set<std::string> excludeFilters;
     auto excludeOpt = features.VulkanValidationExcludeFilter.getValue();
     if (excludeOpt && !excludeOpt->empty()) {
         excludeFilters = parseFilterList(*excludeOpt);
+    } else if (const char* env = getenv("ANDROID_EMU_VVL_EXCLUDE_FILTER")) {
+        excludeFilters = parseFilterList(env);
+    }
+
+    if (valMode.empty() && (!includeFilters.empty() || !excludeFilters.empty())) {
+        valMode = "print";
+        GFXSTREAM_INFO("VVL filters specified without behavior mode, defaulting behavior to '%s'", valMode.c_str());
+    }
+
+    VVLBehavior behavior = parseVVLBehaviorString(valMode);
+    if (behavior != VVLBehavior::None) {
+        ensureVulkanValidationLayersEnabled();
     }
 
     return VVLConfiguration(behavior, std::move(includeFilters), std::move(excludeFilters));
