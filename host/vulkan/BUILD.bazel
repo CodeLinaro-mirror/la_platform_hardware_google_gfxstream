@@ -60,7 +60,6 @@ cc_library(
 cc_library(
     name = "gfxstream_vulkan_server",
     srcs = [
-        "borrowed_image_vk.cpp",
         "buffer_vk.cpp",
         "color_buffer_vk.cpp",
         "compositor_vk.cpp",
@@ -93,7 +92,6 @@ cc_library(
         "vulkan_stream.cpp",
     ],
     hdrs = [
-        "borrowed_image_vk.h",
         "buffer_vk.h",
         "color_buffer_vk.h",
         "compositor_fragment_shader.h",
@@ -161,7 +159,6 @@ cc_library(
         "//common/logging:gfxstream_common_logging",
         "//common/utils:gfxstream_common_utils",
         "//host:gfxstream_backend_headers",
-        "//host:gfxstream_host_headers",
         "//host/common:gfxstream_host_common",
         "//host/compressed_textures:gfxstream_host_compressed_textures",
         "//host/decoder_common:gfxstream_host_decoder_common",
@@ -169,6 +166,7 @@ cc_library(
         "//host/gl/OpenGLESDispatch:gfxstream_host_openglesdispatch_headers",
         "//host/iostream:gfxstream_host_iostream",
         "//host/library:gfxstream_host_library",
+        "//host/native_window:gfxstream_host_native_window",
         "//host/renderdoc:gfxstream_host_renderdoc",
         "//host/tracing:gfxstream_host_tracing",
         "//host/vulkan/cereal:gfxstream_vulkan_cereal",
@@ -239,7 +237,6 @@ cc_test(
     deps = [
         ":gfxstream_vulkan_server",
         "//common/base:gfxstream_common_base",
-        "//host:gfxstream_host_headers",
         "//host/testlibs/oswindow:gfxstream_oswindow_test_support",
         "//host/testlibs/support:gfxstream_host_testing_support",
         "@com_google_googletest//:gtest",
@@ -288,7 +285,6 @@ cc_test(
     deps = [
         ":gfxstream_vulkan_server",
         "//common/base:gfxstream_common_base",
-        "//host:gfxstream_host_headers",
         "//host/features:gfxstream_host_features",
         "//host/testlibs/support:gfxstream_host_testing_support",
         "@com_google_googletest//:gtest",
@@ -305,7 +301,6 @@ cc_test(
     deps = [
         ":gfxstream_vulkan_server",
         "//common/base:gfxstream_common_base",
-        "//host:gfxstream_host_headers",
         "//host/features:gfxstream_host_features",
         "//host/testlibs/support:gfxstream_host_testing_support",
         "//third_party/vulkan:gfxstream_vulkan_headers",
