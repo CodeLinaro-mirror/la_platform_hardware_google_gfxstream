@@ -34,7 +34,7 @@
 #include "framework_formats.h"
 #include "gfxstream/AsyncResult.h"
 #include "gfxstream/EventNotificationSupport.h"
-#include "gfxstream/host/borrowed_image.h"
+#include "gfxstream/host/color_buffer_interface.h"
 #include "gfxstream/host/external_object_manager.h"
 #include "gfxstream/host/gfxstream_format.h"
 #include "gfxstream/host/gl_enums.h"
@@ -59,6 +59,8 @@
 
 namespace gfxstream {
 namespace host {
+
+class GlobalState;
 
 // The FrameBuffer class holds the global state of the emulation library on
 // top of the underlying EGL/GLES implementation. It should probably be
@@ -112,6 +114,8 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     // Return a pointer to the global instance. initialize() must be called
     // previously, or this will return NULL.
     static FrameBuffer* getFB();
+
+    gfxstream::host::GlobalState* getGlobalState();
 
     // Wait for a FrameBuffer instance to be initialized and ready to use.
     // This function blocks the caller until there is a valid initialized
@@ -368,7 +372,7 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
                                  const std::optional<std::array<float, 16>>& colorTransform);
 
     void onLastColorBufferRef(uint32_t handle);
-    ColorBufferPtr findColorBuffer(HandleType p_colorbuffer);
+    IColorBufferRef findColorBuffer(HandleType p_colorbuffer);
     BufferPtr findBuffer(HandleType p_buffer);
 
     void registerProcessCleanupCallback(void* key, uint64_t contextId,
@@ -413,10 +417,6 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
     void asyncWaitForGpuVulkanQsriWithCb(uint64_t image, FenceCompletionCallback cb);
 
     void setGuestManagedColorBufferLifetime(bool guestManaged);
-
-    std::unique_ptr<BorrowedImageInfo> borrowColorBufferForComposition(uint32_t colorBufferHandle,
-                                                                       bool colorBufferIsTarget);
-    std::unique_ptr<BorrowedImageInfo> borrowColorBufferForDisplay(uint32_t colorBufferHandle);
 
     void logVulkanDeviceLost();
 

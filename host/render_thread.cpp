@@ -315,7 +315,7 @@ intptr_t RenderThread::main() {
     // initialize decoders
 #if GFXSTREAM_ENABLE_HOST_GLES
     if (FrameBuffer::getFB()->hasEmulationGl()) {
-        tInfo->initGl();
+        tInfo->initGl(FrameBuffer::getFB()->getGlobalState());
     }
 
     initRenderControlContext(&(tInfo->m_rcDec));
