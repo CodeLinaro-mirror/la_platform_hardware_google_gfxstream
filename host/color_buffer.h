@@ -26,7 +26,7 @@
 #include "gfxstream/host/handle.h"
 #include "render-utils/Renderer.h"
 #include "render-utils/stream.h"
-#include "snapshot/LazySnapshotObj.h"
+#include "gfxstream/host/lazy_snapshot_object.h"
 
 namespace gfxstream {
 namespace host {
@@ -56,7 +56,7 @@ class ColorBuffer : public IColorBuffer, public LazySnapshotObj<ColorBuffer> {
 
     static std::shared_ptr<ColorBuffer> onLoad(gl::EmulationGl* emulationGl,
                                                vk::VkEmulation* emulationVk, Stream* stream);
-    void onSave(Stream* stream);
+    bool onSave(Stream* stream);
     void restore();
     void touch() override;
 
