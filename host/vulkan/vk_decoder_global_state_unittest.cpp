@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <optional>
 #include <thread>
 
 #include "gfxstream/testing/TestUtils.h"
@@ -270,6 +271,65 @@ struct VkDecoderGlobalStateTestPeer {
 
     void destroyInstanceObjects(InstanceObjects& instanceObjects) {
         impl.destroyInstanceObjects(instanceObjects);
+    }
+
+    void setSnapshotsEnabled(bool enabled) { impl.mSnapshotsEnabled = enabled; }
+
+    VkDevice registerSnapshotImageTestRig(VulkanDispatch* globalVk, VulkanDispatch* instanceVk,
+                                          VulkanDispatch* deviceVk, VkInstance unboxedInstance,
+                                          VkPhysicalDevice unboxedPhysicalDevice,
+                                          VkDevice unboxedDevice, uint32_t apiVersion,
+                                          std::vector<std::string> instanceExtensions = {}) {
+        impl.m_vk = globalVk;
+        VkInstance boxedInstance = new_boxed_VkInstance(unboxedInstance, instanceVk);
+        VkPhysicalDevice boxedPhysDev =
+            new_boxed_VkPhysicalDevice(unboxedPhysicalDevice, instanceVk);
+        VkDevice boxedDevice = new_boxed_VkDevice(unboxedDevice, deviceVk);
+
+        VkPhysicalDeviceMemoryProperties hostMemProps = {};
+        hostMemProps.memoryHeapCount = 1;
+        hostMemProps.memoryHeaps[0].size = 64ULL * 1024 * 1024;
+        hostMemProps.memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+        hostMemProps.memoryTypeCount = 1;
+        hostMemProps.memoryTypes[0].heapIndex = 0;
+        hostMemProps.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+        std::lock_guard<std::mutex> lock(impl.mMutex);
+        InstanceInfo& instanceInfo = impl.mInstanceInfo[unboxedInstance];
+        instanceInfo.apiVersion = apiVersion;
+        instanceInfo.enabledExtensionNames = std::move(instanceExtensions);
+        instanceInfo.boxed = boxedInstance;
+        instanceInfo.boxedPhysicalDevices = {boxedPhysDev};
+
+        PhysicalDeviceInfo& physDevInfo = impl.mPhysdevInfo[unboxedPhysicalDevice];
+        physDevInfo.instance = unboxedInstance;
+        physDevInfo.props.apiVersion = apiVersion;
+        physDevInfo.memoryPropertiesHelper = std::make_unique<EmulatedPhysicalDeviceMemoryProperties>(
+            hostMemProps, /*hostColorBufferMemoryTypeIndex=*/0, gfxstream::host::FeatureSet{});
+
+        DeviceInfo& devInfo = impl.mDeviceInfo[unboxedDevice];
+        devInfo.physicalDevice = unboxedPhysicalDevice;
+        devInfo.boxed = boxedDevice;
+        devInfo.maxImageDimension2D = 4096;
+        devInfo.decompPipelines =
+            std::make_unique<GpuDecompressionPipelineManager>(deviceVk, unboxedDevice);
+        devInfo.deviceOpTracker = std::make_shared<DeviceOpTracker>(unboxedDevice, deviceVk);
+        devInfo.externalFencePool =
+            std::make_unique<ExternalFencePool<VulkanDispatch>>(deviceVk, unboxedDevice);
+        return boxedDevice;
+    }
+
+    VkResult createImage(gfxstream::base::BumpPool* pool, VkDevice boxedDevice,
+                         const VkImageCreateInfo* pCreateInfo, VkImage* pImage) {
+        return impl.on_vkCreateImage(pool, kInvalidSnapshotApiCallHandle, boxedDevice, pCreateInfo,
+                                     nullptr, pImage);
+    }
+
+    void getDeviceImageMemoryRequirements(gfxstream::base::BumpPool* pool, VkDevice boxedDevice,
+                                          const VkDeviceImageMemoryRequirements* pInfo,
+                                          VkMemoryRequirements2* pMemoryRequirements) {
+        impl.on_vkGetDeviceImageMemoryRequirements(pool, kInvalidSnapshotApiCallHandle, boxedDevice,
+                                                   pInfo, pMemoryRequirements);
     }
 };
 
@@ -666,6 +726,499 @@ TEST(VkDecoderGlobalStateProcessCleanupLeakTest,
     }
     EXPECT_EQ(nullptr, sBoxedHandleManager.get(reinterpret_cast<uint64_t>(boxedInstance)));
     EXPECT_EQ(baselineHandles, sBoxedHandleManager.getHandlesCount());
+}
+
+class VkDecoderGlobalStateSnapshotImageFlagsTest : public ::testing::Test {
+   protected:
+    static constexpr VkImageUsageFlags kTransferUsage =
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+    void SetUp() override {
+        mBaselineHandles = sBoxedHandleManager.getHandlesCount();
+        sLastCreatedUsage = 0;
+        sLastCreatedStencilUsage = 0;
+        sLastMemReqUsage = 0;
+        sLastMemReqStencilUsage = 0;
+        sFormatProps1Calls = 0;
+        sFormatProps2Calls = 0;
+        sFormatProps2KhrCalls = 0;
+        sAllowTransferUsage = true;
+        sTransferUnsupportedDrmModifier.reset();
+        sFormatProps = {
+            .maxExtent = {4096, 4096, 256},
+            .maxMipLevels = 12,
+            .maxArrayLayers = 256,
+            .sampleCounts = VK_SAMPLE_COUNT_1_BIT,
+            .maxResourceSize = 1ULL << 30,
+        };
+        sExternalFeatures =
+            VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+        sCompatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        sObservedExternalHandleType = static_cast<VkExternalMemoryHandleTypeFlagBits>(0);
+        sObservedFormatListViewCount = 0;
+        sObservedDrmModifier = 0;
+        sObservedStencilUsage = 0;
+        sNextImageId = 0xe100'0000ULL;
+
+        mGlobalVk.vkDestroyInstance = [](VkInstance, const VkAllocationCallbacks*) {};
+        mGlobalVk.vkDestroyDevice = [](VkDevice, const VkAllocationCallbacks*) {};
+
+        // Device dispatch intentionally leaves physical-device entry points null, matching
+        // vkGetDeviceProcAddr behavior per the Vulkan specification.
+        mDeviceVk.vkDeviceWaitIdle = [](VkDevice) -> VkResult { return VK_SUCCESS; };
+        mDeviceVk.vkCreateImage = [](VkDevice, const VkImageCreateInfo* pCreateInfo,
+                                     const VkAllocationCallbacks*, VkImage* pImage) -> VkResult {
+            sLastCreatedUsage = pCreateInfo->usage;
+            sLastCreatedStencilUsage = getStencilUsage(pCreateInfo);
+            *pImage = reinterpret_cast<VkImage>(sNextImageId++);
+            return VK_SUCCESS;
+        };
+        mDeviceVk.vkDestroyImage = [](VkDevice, VkImage, const VkAllocationCallbacks*) {};
+        mDeviceVk.vkDestroyDescriptorSetLayout =
+            [](VkDevice, VkDescriptorSetLayout, const VkAllocationCallbacks*) {};
+        mDeviceVk.vkDestroyPipelineLayout =
+            [](VkDevice, VkPipelineLayout, const VkAllocationCallbacks*) {};
+        mDeviceVk.vkGetDeviceImageMemoryRequirements =
+            [](VkDevice, const VkDeviceImageMemoryRequirements* pInfo,
+               VkMemoryRequirements2* pMemoryRequirements) {
+                sLastMemReqUsage = pInfo->pCreateInfo->usage;
+                sLastMemReqStencilUsage = getStencilUsage(pInfo->pCreateInfo);
+                pMemoryRequirements->memoryRequirements.size =
+                    (pInfo->pCreateInfo->usage & kTransferUsage) == kTransferUsage ? 8192 : 4096;
+                pMemoryRequirements->memoryRequirements.alignment = 256;
+                pMemoryRequirements->memoryRequirements.memoryTypeBits = 0x1;
+            };
+
+        mInstanceVk.vkGetPhysicalDeviceImageFormatProperties =
+            [](VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags usage,
+               VkImageCreateFlags, VkImageFormatProperties* pProps) -> VkResult {
+            ++sFormatProps1Calls;
+            if (!sAllowTransferUsage && (usage & kTransferUsage) != 0) {
+                return VK_ERROR_FORMAT_NOT_SUPPORTED;
+            }
+            *pProps = sFormatProps;
+            return VK_SUCCESS;
+        };
+        mInstanceVk.vkGetPhysicalDeviceImageFormatProperties2 = &onGetImageFormatProperties2;
+        mInstanceVk.vkGetPhysicalDeviceImageFormatProperties2KHR = &onGetImageFormatProperties2Khr;
+
+        mPeer.setSnapshotsEnabled(true);
+    }
+
+    void TearDown() override {
+        InstanceObjects instanceObjects = mPeer.extractInstanceObjectsForCleanupTest(mUnboxedInst);
+        mPeer.destroyInstanceObjects(instanceObjects);
+        EXPECT_EQ(mBaselineHandles, sBoxedHandleManager.getHandlesCount());
+    }
+
+    VkDevice registerRig(uint32_t apiVersion = VK_API_VERSION_1_1,
+                         std::vector<std::string> exts = {}) {
+        return mPeer.registerSnapshotImageTestRig(&mGlobalVk, &mInstanceVk, &mDeviceVk,
+                                                  mUnboxedInst, mUnboxedPhysDev, mUnboxedDev,
+                                                  apiVersion, std::move(exts));
+    }
+
+    static VkImageCreateInfo makeBaseImageCreateInfo(VkImageUsageFlags usage) {
+        return VkImageCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .extent = {64, 64, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = usage,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+    }
+
+    static VkImageUsageFlags getStencilUsage(const VkImageCreateInfo* pCreateInfo) {
+        const auto* stencilUsageCi = vk_find_struct<VkImageStencilUsageCreateInfo>(pCreateInfo);
+        return stencilUsageCi ? stencilUsageCi->stencilUsage : 0;
+    }
+
+    static VkResult handleImageFormatProperties2(const VkPhysicalDeviceImageFormatInfo2* pInfo,
+                                                 VkImageFormatProperties2* pProps) {
+        std::optional<uint64_t> drmModifier;
+        for (const auto* node = reinterpret_cast<const VkBaseInStructure*>(pInfo->pNext); node;
+             node = node->pNext) {
+            // VkExternalMemoryImageCreateInfo is only valid on VkImageCreateInfo, never on
+            // VkPhysicalDeviceImageFormatInfo2.
+            EXPECT_NE(VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, node->sType);
+            if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO) {
+                sObservedExternalHandleType =
+                    reinterpret_cast<const VkPhysicalDeviceExternalImageFormatInfo*>(node)
+                        ->handleType;
+            } else if (node->sType == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) {
+                sObservedFormatListViewCount =
+                    reinterpret_cast<const VkImageFormatListCreateInfo*>(node)->viewFormatCount;
+            } else if (node->sType ==
+                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT) {
+                drmModifier =
+                    reinterpret_cast<const VkPhysicalDeviceImageDrmFormatModifierInfoEXT*>(node)
+                        ->drmFormatModifier;
+                sObservedDrmModifier = *drmModifier;
+            } else if (node->sType == VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_CREATE_INFO) {
+                sObservedStencilUsage =
+                    reinterpret_cast<const VkImageStencilUsageCreateInfo*>(node)->stencilUsage;
+            }
+        }
+        const bool rejectTransferUsage =
+            !sAllowTransferUsage ||
+            (drmModifier.has_value() && drmModifier == sTransferUnsupportedDrmModifier);
+        if (rejectTransferUsage && (pInfo->usage & kTransferUsage) != 0) {
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+        }
+        pProps->imageFormatProperties = sFormatProps;
+        if (auto* extProps = vk_find_struct<VkExternalImageFormatProperties>(pProps)) {
+            extProps->externalMemoryProperties.externalMemoryFeatures = sExternalFeatures;
+            extProps->externalMemoryProperties.compatibleHandleTypes = sCompatibleHandleTypes;
+        }
+        return VK_SUCCESS;
+    }
+
+    static VkResult onGetImageFormatProperties2(VkPhysicalDevice,
+                                                const VkPhysicalDeviceImageFormatInfo2* pInfo,
+                                                VkImageFormatProperties2* pProps) {
+        ++sFormatProps2Calls;
+        return handleImageFormatProperties2(pInfo, pProps);
+    }
+
+    static VkResult onGetImageFormatProperties2Khr(VkPhysicalDevice,
+                                                   const VkPhysicalDeviceImageFormatInfo2* pInfo,
+                                                   VkImageFormatProperties2* pProps) {
+        ++sFormatProps2KhrCalls;
+        return handleImageFormatProperties2(pInfo, pProps);
+    }
+
+    VkDecoderGlobalStateTestPeer mPeer;
+    VulkanDispatch mGlobalVk = {};
+    VulkanDispatch mInstanceVk = {};
+    VulkanDispatch mDeviceVk = {};
+    gfxstream::base::BumpPool mPool;
+    uint64_t mBaselineHandles = 0;
+
+    VkInstance mUnboxedInst = reinterpret_cast<VkInstance>(0xe001'0000ULL);
+    VkPhysicalDevice mUnboxedPhysDev = reinterpret_cast<VkPhysicalDevice>(0xe002'0000ULL);
+    VkDevice mUnboxedDev = reinterpret_cast<VkDevice>(0xe003'0000ULL);
+
+    static inline VkImageUsageFlags sLastCreatedUsage = 0;
+    static inline VkImageUsageFlags sLastCreatedStencilUsage = 0;
+    static inline VkImageUsageFlags sLastMemReqUsage = 0;
+    static inline VkImageUsageFlags sLastMemReqStencilUsage = 0;
+    static inline int sFormatProps1Calls = 0;
+    static inline int sFormatProps2Calls = 0;
+    static inline int sFormatProps2KhrCalls = 0;
+    static inline bool sAllowTransferUsage = true;
+    static inline std::optional<uint64_t> sTransferUnsupportedDrmModifier;
+    static inline VkImageFormatProperties sFormatProps = {};
+    static inline VkExternalMemoryFeatureFlags sExternalFeatures = 0;
+    static inline VkExternalMemoryHandleTypeFlags sCompatibleHandleTypes = 0;
+    static inline VkExternalMemoryHandleTypeFlagBits sObservedExternalHandleType =
+        static_cast<VkExternalMemoryHandleTypeFlagBits>(0);
+    static inline uint32_t sObservedFormatListViewCount = 0;
+    static inline uint64_t sObservedDrmModifier = 0;
+    static inline VkImageUsageFlags sObservedStencilUsage = 0;
+    static inline uint64_t sNextImageId = 0xe100'0000ULL;
+};
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest,
+       UsesInstanceDispatchAndAddsTransferFlagsWhenSupported) {
+    VkDevice boxedDevice = registerRig();
+    ASSERT_EQ(nullptr, mDeviceVk.vkGetPhysicalDeviceImageFormatProperties);
+
+    VkImageCreateInfo ci = makeBaseImageCreateInfo(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                                   VK_IMAGE_USAGE_SAMPLED_BIT);
+    VkImage boxedImage = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage));
+    EXPECT_EQ(1, sFormatProps1Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage,
+              sLastCreatedUsage);
+
+    // If transfer usage only supports 1x samples, 4x MSAA images must keep their original usage.
+    VkImageCreateInfo msaaCi = ci;
+    msaaCi.samples = VK_SAMPLE_COUNT_4_BIT;
+    VkImage boxedMsaaImage = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &msaaCi, &boxedMsaaImage));
+    EXPECT_EQ(2, sFormatProps1Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, sLastCreatedUsage);
+
+    sAllowTransferUsage = false;
+    VkImage boxedImageUnsupported = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImageUnsupported));
+    EXPECT_EQ(3, sFormatProps1Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, sLastCreatedUsage);
+}
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest,
+       SkipsRedundantFormatQueryWhenTransferFlagsAlreadySet) {
+    VkDevice boxedDevice = registerRig();
+    VkImageCreateInfo ci =
+        makeBaseImageCreateInfo(VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage);
+
+    VkImage boxedImage = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage));
+    EXPECT_EQ(0, sFormatProps1Calls);
+    EXPECT_EQ(0, sFormatProps2Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage, sLastCreatedUsage);
+}
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest,
+       QueriesExternalImageFormatProperties2WhenExternalMemoryPresent) {
+    VkDevice boxedDevice = registerRig(VK_API_VERSION_1_1);
+
+    VkExternalMemoryImageCreateInfo extMemCi = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkImageCreateInfo ci = makeBaseImageCreateInfo(VK_IMAGE_USAGE_SAMPLED_BIT);
+    ci.pNext = &extMemCi;
+
+    // Driver reports format unsupported for transfer usage with this external handle type.
+    sAllowTransferUsage = false;
+    VkImage boxedImage1 = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage1));
+    EXPECT_EQ(0, sFormatProps1Calls);
+    EXPECT_EQ(1, sFormatProps2Calls);
+    EXPECT_EQ(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT, sObservedExternalHandleType);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT, sLastCreatedUsage);
+
+    // Driver returns VK_SUCCESS, but externalMemoryFeatures == 0 (handle type not usable with
+    // transfer usage).
+    sAllowTransferUsage = true;
+    sExternalFeatures = 0;
+    VkImage boxedImage2 = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage2));
+    EXPECT_EQ(0, sFormatProps1Calls);
+    EXPECT_EQ(2, sFormatProps2Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT, sLastCreatedUsage);
+
+    // Driver reports external handle type is importable/exportable and compatible with transfer
+    // usage.
+    sExternalFeatures = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
+    sCompatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    VkImage boxedImage3 = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage3));
+    EXPECT_EQ(0, sFormatProps1Calls);
+    EXPECT_EQ(3, sFormatProps2Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage, sLastCreatedUsage);
+}
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest,
+       UsesImageFormatProperties2KHRAndForwardsCompatiblePNextStructs) {
+    VkDevice boxedDevice =
+        registerRig(VK_API_VERSION_1_0, {VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME});
+
+    const VkFormat viewFormats[2] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB};
+    VkExternalMemoryImageCreateInfo extMemCi = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkImageFormatListCreateInfo formatListCi = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+        .pNext = &extMemCi,
+        .viewFormatCount = 2,
+        .pViewFormats = viewFormats,
+    };
+    VkImageCreateInfo ci = makeBaseImageCreateInfo(VK_IMAGE_USAGE_SAMPLED_BIT);
+    ci.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    ci.pNext = &formatListCi;
+
+    VkImage boxedImage = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage));
+    EXPECT_EQ(0, sFormatProps1Calls);
+    EXPECT_EQ(0, sFormatProps2Calls);
+    EXPECT_EQ(1, sFormatProps2KhrCalls);
+    EXPECT_EQ(2u, sObservedFormatListViewCount);
+    EXPECT_EQ(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT, sObservedExternalHandleType);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage, sLastCreatedUsage);
+    // Original guest pNext chain must remain intact.
+    EXPECT_EQ(&extMemCi, formatListCi.pNext);
+}
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest,
+       MirrorsTransferUsageAdjustmentInGetDeviceImageMemoryRequirements) {
+    VkDevice boxedDevice = registerRig();
+
+    VkImageCreateInfo ci = makeBaseImageCreateInfo(VK_IMAGE_USAGE_SAMPLED_BIT);
+    VkDeviceImageMemoryRequirements reqInfo = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS,
+        .pNext = nullptr,
+        .pCreateInfo = &ci,
+        .planeAspect = VK_IMAGE_ASPECT_NONE,
+    };
+    VkMemoryRequirements2 memReqs = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+    };
+
+    mPeer.getDeviceImageMemoryRequirements(&mPool, boxedDevice, &reqInfo, &memReqs);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage, sLastMemReqUsage);
+    EXPECT_EQ(8192u, memReqs.memoryRequirements.size);
+
+    // When driver rejects transfer usage, memory requirements query uses original usage too.
+    sAllowTransferUsage = false;
+    mPeer.getDeviceImageMemoryRequirements(&mPool, boxedDevice, &reqInfo, &memReqs);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT, sLastMemReqUsage);
+    EXPECT_EQ(4096u, memReqs.memoryRequirements.size);
+
+    // When snapshots are disabled, no transfer flags are added.
+    sAllowTransferUsage = true;
+    mPeer.setSnapshotsEnabled(false);
+    mPeer.getDeviceImageMemoryRequirements(&mPool, boxedDevice, &reqInfo, &memReqs);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT, sLastMemReqUsage);
+    EXPECT_EQ(4096u, memReqs.memoryRequirements.size);
+}
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest,
+       HandlesDrmFormatModifiersAndSkipsUnrecognizedPNextStructs) {
+    VkDevice boxedDevice = registerRig();
+
+    constexpr uint64_t kModifier = 0x0100000000000001ULL;
+    VkImageDrmFormatModifierListCreateInfoEXT drmListCi = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
+        .pNext = nullptr,
+        .drmFormatModifierCount = 1,
+        .pDrmFormatModifiers = &kModifier,
+    };
+    VkImageCreateInfo drmCi = makeBaseImageCreateInfo(VK_IMAGE_USAGE_SAMPLED_BIT);
+    drmCi.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    drmCi.pNext = &drmListCi;
+
+    VkImage boxedDrmImage = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &drmCi, &boxedDrmImage));
+    EXPECT_EQ(0, sFormatProps1Calls);
+    EXPECT_EQ(1, sFormatProps2Calls);
+    EXPECT_EQ(kModifier, sObservedDrmModifier);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage, sLastCreatedUsage);
+
+    // Unrecognized VkImageCreateInfo-only structs (e.g. VkImageSwapchainCreateInfoKHR) fall back
+    // conservatively without querying or mutating usage.
+    VkImageSwapchainCreateInfoKHR swapchainCi = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = nullptr,
+        .swapchain = VK_NULL_HANDLE,
+    };
+    VkImageCreateInfo swapImgCi = makeBaseImageCreateInfo(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    swapImgCi.pNext = &swapchainCi;
+
+    VkImage boxedSwapImage = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &swapImgCi, &boxedSwapImage));
+    EXPECT_EQ(0, sFormatProps1Calls);
+    EXPECT_EQ(1, sFormatProps2Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, sLastCreatedUsage);
+}
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest, AddsTransferFlagsToSeparateStencilUsage) {
+    VkDevice boxedDevice = registerRig();
+
+    constexpr VkImageUsageFlags kDepthStencilUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    VkImageStencilUsageCreateInfo stencilUsageCi = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .stencilUsage = kDepthStencilUsage,
+    };
+    VkImageCreateInfo ci = makeBaseImageCreateInfo(kDepthStencilUsage);
+    ci.format = VK_FORMAT_D24_UNORM_S8_UINT;
+    ci.pNext = &stencilUsageCi;
+
+    VkImage boxedImage1 = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage1));
+    EXPECT_EQ(1, sFormatProps2Calls);
+    EXPECT_EQ(kDepthStencilUsage | kTransferUsage, sObservedStencilUsage);
+    EXPECT_EQ(kDepthStencilUsage | kTransferUsage, sLastCreatedUsage);
+    EXPECT_EQ(kDepthStencilUsage | kTransferUsage, sLastCreatedStencilUsage);
+    // Original guest pNext chain must remain intact.
+    EXPECT_EQ(kDepthStencilUsage, stencilUsageCi.stencilUsage);
+
+    VkDeviceImageMemoryRequirements reqInfo = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS,
+        .pNext = nullptr,
+        .pCreateInfo = &ci,
+        .planeAspect = VK_IMAGE_ASPECT_NONE,
+    };
+    VkMemoryRequirements2 memReqs = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+    };
+    mPeer.getDeviceImageMemoryRequirements(&mPool, boxedDevice, &reqInfo, &memReqs);
+    EXPECT_EQ(2, sFormatProps2Calls);
+    EXPECT_EQ(kDepthStencilUsage | kTransferUsage, sLastMemReqUsage);
+    EXPECT_EQ(kDepthStencilUsage | kTransferUsage, sLastMemReqStencilUsage);
+
+    // The stencil usage still needs the transfer flags when only the depth usage has them.
+    ci.usage = kDepthStencilUsage | kTransferUsage;
+    VkImage boxedImage2 = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage2));
+    EXPECT_EQ(3, sFormatProps2Calls);
+    EXPECT_EQ(kDepthStencilUsage | kTransferUsage, sLastCreatedUsage);
+    EXPECT_EQ(kDepthStencilUsage | kTransferUsage, sLastCreatedStencilUsage);
+
+    // No driver query is needed once all aspects already request the transfer flags.
+    stencilUsageCi.stencilUsage = kDepthStencilUsage | kTransferUsage;
+    VkImage boxedImage3 = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage3));
+    EXPECT_EQ(3, sFormatProps2Calls);
+    EXPECT_EQ(kDepthStencilUsage | kTransferUsage, sLastCreatedStencilUsage);
+}
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest, SkipsSparseImagesRequestedWithCreateFlags2) {
+    VkDevice boxedDevice = registerRig();
+
+    VkImageCreateFlags2CreateInfoKHR flags2Ci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_FLAGS_2_CREATE_INFO_KHR,
+        .pNext = nullptr,
+        .flags = VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR,
+    };
+    VkImageCreateInfo ci = makeBaseImageCreateInfo(VK_IMAGE_USAGE_SAMPLED_BIT);
+    ci.pNext = &flags2Ci;
+
+    VkImage boxedSparseImage = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedSparseImage));
+    EXPECT_EQ(0, sFormatProps2Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT, sLastCreatedUsage);
+
+    // Non-sparse 64-bit create flags do not prevent adding the transfer flags.
+    flags2Ci.flags = VK_IMAGE_CREATE_2_MUTABLE_FORMAT_BIT_KHR;
+    VkImage boxedImage = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage));
+    EXPECT_EQ(1, sFormatProps2Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage, sLastCreatedUsage);
+}
+
+TEST_F(VkDecoderGlobalStateSnapshotImageFlagsTest,
+       RequiresAllListedDrmFormatModifiersToSupportTransferFlags) {
+    VkDevice boxedDevice = registerRig();
+
+    const uint64_t modifiers[2] = {0x0100000000000001ULL, 0x0100000000000002ULL};
+    VkImageDrmFormatModifierListCreateInfoEXT drmListCi = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
+        .pNext = nullptr,
+        .drmFormatModifierCount = 2,
+        .pDrmFormatModifiers = modifiers,
+    };
+    VkImageCreateInfo ci = makeBaseImageCreateInfo(VK_IMAGE_USAGE_SAMPLED_BIT);
+    ci.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    ci.pNext = &drmListCi;
+
+    // The driver may select any listed modifier, so a single modifier without transfer support
+    // keeps the original usage.
+    sTransferUnsupportedDrmModifier = modifiers[1];
+    VkImage boxedImage1 = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage1));
+    EXPECT_EQ(2, sFormatProps2Calls);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT, sLastCreatedUsage);
+
+    sTransferUnsupportedDrmModifier.reset();
+    VkImage boxedImage2 = VK_NULL_HANDLE;
+    ASSERT_EQ(VK_SUCCESS, mPeer.createImage(&mPool, boxedDevice, &ci, &boxedImage2));
+    EXPECT_EQ(4, sFormatProps2Calls);
+    EXPECT_EQ(modifiers[1], sObservedDrmModifier);
+    EXPECT_EQ(VK_IMAGE_USAGE_SAMPLED_BIT | kTransferUsage, sLastCreatedUsage);
 }
 
 }  // namespace
