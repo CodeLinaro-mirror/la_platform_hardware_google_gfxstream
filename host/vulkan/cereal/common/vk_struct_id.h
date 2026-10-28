@@ -201,6 +201,7 @@ REGISTER_VK_STRUCT_ID(VkPhysicalDeviceMemoryBudgetPropertiesEXT,
 
 REGISTER_VK_STRUCT_ID(VkPhysicalDeviceHostImageCopyFeaturesEXT,
                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT);
+
 REGISTER_VK_STRUCT_ID(VkPhysicalDeviceShaderFloatControls2Features,
                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT_CONTROLS_2_FEATURES);
 
