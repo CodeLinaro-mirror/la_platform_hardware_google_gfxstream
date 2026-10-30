@@ -8065,7 +8065,7 @@ class VkDecoderGlobalState::Impl {
                 info->needUnmap = true;
             }
 
-            auto exportedMemoryOpt = exportMemoryHandle(deviceInfo, vk, device, memory);
+            auto exportedMemoryOpt = exportMemoryHandle(deviceInfo, vk, device, memory, info);
             if (!exportedMemoryOpt) {
                 return VK_ERROR_OUT_OF_HOST_MEMORY;
             }
@@ -11155,7 +11155,8 @@ class VkDecoderGlobalState::Impl {
 
     std::optional<BlobDescriptorType> exportMemoryHandle(struct DeviceInfo* deviceInfo,
                                                          VulkanDispatch* vk, VkDevice device,
-                                                         VkDeviceMemory memory) {
+                                                         VkDeviceMemory memory,
+                                                         const MemoryInfo* info) {
         BlobDescriptorType ret;
 
         const auto extMemMode = m_vkEmulation->getExternalMemoryMode();
@@ -11221,6 +11222,9 @@ class VkDecoderGlobalState::Impl {
 #endif
 #ifdef __ANDROID__
             case ExternalMemory::Mode::AndroidAHB: {
+                if (info && info->boundColorBuffer.has_value()) {
+                    return m_vkEmulation->dupColorBufferExtMemoryHandle(*info->boundColorBuffer);
+                }
                 if (!vk->vkGetMemoryAndroidHardwareBufferANDROID) {
                     GFXSTREAM_ERROR("%s: External memory function not supported.", __func__);
                     return std::nullopt;
