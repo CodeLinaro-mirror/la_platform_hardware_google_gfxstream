@@ -2291,12 +2291,6 @@ class VkDecoderGlobalState::Impl {
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
 
-        if (pQueueFamilyProperties && pQueueFamilyProperties->pNext) {
-            // We need to call the driver version to fill in any pNext values
-            vk->vkGetPhysicalDeviceQueueFamilyProperties2(physicalDevice, pQueueFamilyPropertyCount,
-                                                          pQueueFamilyProperties);
-        }
-
         std::lock_guard<std::mutex> lock(mMutex);
 
         const PhysicalDeviceInfo* physicalDeviceInfo =
@@ -2304,6 +2298,29 @@ class VkDecoderGlobalState::Impl {
         if (!physicalDeviceInfo || !physicalDeviceInfo->queuePropertiesHelper) {
             GFXSTREAM_ERROR("Failed to find physical device info.");
             return;
+        }
+
+        const InstanceInfo* instanceInfo =
+            gfxstream::base::find(mInstanceInfo, physicalDeviceInfo->instance);
+        if (!instanceInfo) {
+            GFXSTREAM_ERROR("Failed to find instance info.");
+            return;
+        }
+
+        if (pQueueFamilyProperties && pQueueFamilyProperties->pNext) {
+            // We need to call the driver version to fill in any pNext values
+            if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
+                physicalDeviceInfo->props.apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
+                vk->vkGetPhysicalDeviceQueueFamilyProperties2) {
+                vk->vkGetPhysicalDeviceQueueFamilyProperties2(
+                    physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+            } else if (hasInstanceExtension(
+                           physicalDeviceInfo->instance,
+                           VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME) &&
+                       vk->vkGetPhysicalDeviceQueueFamilyProperties2KHR) {
+                vk->vkGetPhysicalDeviceQueueFamilyProperties2KHR(
+                    physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+            }
         }
 
         // Use queuePropertiesHelper to accommodate for any property overrides/emulation
@@ -4799,9 +4816,20 @@ class VkDecoderGlobalState::Impl {
                         VkResult res = VK_SUCCESS;
                         if (pendingSubmitCall->mSubmitInfo2s.size()) {
                             // Deferred vkQueueSubmit2 call
-                            res = deviceDispatch->vkQueueSubmit2(
-                                unboxed_queue, pendingSubmitCall->mSubmitInfo2s.size(),
-                                pendingSubmitCall->mSubmitInfo2s.data(), pendingSubmitCall->mFence);
+                            if (deviceDispatch->vkQueueSubmit2) {
+                                res = deviceDispatch->vkQueueSubmit2(
+                                    unboxed_queue, pendingSubmitCall->mSubmitInfo2s.size(),
+                                    pendingSubmitCall->mSubmitInfo2s.data(),
+                                    pendingSubmitCall->mFence);
+                            } else if (deviceDispatch->vkQueueSubmit2KHR) {
+                                res = deviceDispatch->vkQueueSubmit2KHR(
+                                    unboxed_queue, pendingSubmitCall->mSubmitInfo2s.size(),
+                                    pendingSubmitCall->mSubmitInfo2s.data(),
+                                    pendingSubmitCall->mFence);
+                            } else {
+                                GFXSTREAM_FATAL("%s: function implementation cannot be found!",
+                                                __func__);
+                            }
 
                             if (res == VK_SUCCESS) {
                                 // We'll signal semaphores after the submission
@@ -6673,6 +6701,15 @@ class VkDecoderGlobalState::Impl {
                                   const VkDependencyInfo* pDependencyInfo) {
         auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
         auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
+        auto dispatchCmdPipelineBarrier2 = [&](const VkDependencyInfo* info) {
+            if (vk->vkCmdPipelineBarrier2) {
+                vk->vkCmdPipelineBarrier2(commandBuffer, info);
+            } else if (vk->vkCmdPipelineBarrier2KHR) {
+                vk->vkCmdPipelineBarrier2KHR(commandBuffer, info);
+            } else {
+                GFXSTREAM_FATAL("%s: function implementation cannot be found!", __func__);
+            }
+        };
 
         for (uint32_t i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; ++i) {
             convertQueueFamilyForeignToExternal_VkBufferMemoryBarrier2(
@@ -6708,7 +6745,7 @@ class VkDecoderGlobalState::Impl {
                                         pDependencyInfo->pImageMemoryBarriers);
 
         if (!deviceInfo->emulateTextureEtc2 && !deviceInfo->emulateTextureAstc) {
-            vk->vkCmdPipelineBarrier2(commandBuffer, pDependencyInfo);
+            dispatchCmdPipelineBarrier2(pDependencyInfo);
             return;
         }
 
@@ -6754,7 +6791,7 @@ class VkDecoderGlobalState::Impl {
         VkDependencyInfo dependencyInfo = *pDependencyInfo;
         dependencyInfo.imageMemoryBarrierCount = static_cast<uint32_t>(imageBarriers.size());
         dependencyInfo.pImageMemoryBarriers = imageBarriers.data();
-        vk->vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+        dispatchCmdPipelineBarrier2(&dependencyInfo);
     }
 
     void on_vkCmdWaitEvents(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
@@ -6849,7 +6886,13 @@ class VkDecoderGlobalState::Impl {
                                             pDependencyInfos[i].pImageMemoryBarriers);
         }
 
-        vk->vkCmdWaitEvents2(commandBuffer, eventCount, pEvents, pDependencyInfos);
+        if (vk->vkCmdWaitEvents2) {
+            vk->vkCmdWaitEvents2(commandBuffer, eventCount, pEvents, pDependencyInfos);
+        } else if (vk->vkCmdWaitEvents2KHR) {
+            vk->vkCmdWaitEvents2KHR(commandBuffer, eventCount, pEvents, pDependencyInfos);
+        } else {
+            GFXSTREAM_FATAL("%s: function implementation cannot be found!", __func__);
+        }
     }
 
     void on_vkCmdWaitEvents2KHR(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle,
@@ -7663,6 +7706,8 @@ class VkDecoderGlobalState::Impl {
     VkResult on_vkMapMemoryLocked(VkDevice, VkDeviceMemory memory, VkDeviceSize offset,
                                   VkDeviceSize size, VkMemoryMapFlags flags, void** ppData)
         REQUIRES(mMutex) {
+        if (!ppData) return VK_ERROR_MEMORY_MAP_FAILED;
+
         auto* info = gfxstream::base::find(mMemoryInfo, memory);
         if (!info || !info->ptr) return VK_ERROR_MEMORY_MAP_FAILED;  // Invalid usage.
 
@@ -7673,10 +7718,27 @@ class VkDecoderGlobalState::Impl {
         return VK_SUCCESS;
     }
 
+    VkResult on_vkMapMemory2(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
+                             VkDevice boxed_device, const VkMemoryMapInfo* pMemoryMapInfo,
+                             void** ppData) {
+        if (!pMemoryMapInfo || !ppData) return VK_ERROR_MEMORY_MAP_FAILED;
+        return on_vkMapMemory(pool, apiCallHandle, boxed_device, pMemoryMapInfo->memory,
+                              pMemoryMapInfo->offset, pMemoryMapInfo->size, pMemoryMapInfo->flags,
+                              ppData);
+    }
+
     void on_vkUnmapMemory(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle, VkDevice,
                           VkDeviceMemory) {
         // no-op; user-level mapping does not correspond
         // to any operation here.
+    }
+
+    VkResult on_vkUnmapMemory2(gfxstream::base::BumpPool* pool,
+                               VkSnapshotApiCallHandle apiCallHandle, VkDevice boxed_device,
+                               const VkMemoryUnmapInfo* pMemoryUnmapInfo) {
+        if (!pMemoryUnmapInfo) return VK_ERROR_MEMORY_MAP_FAILED;
+        on_vkUnmapMemory(pool, apiCallHandle, boxed_device, pMemoryUnmapInfo->memory);
+        return VK_SUCCESS;
     }
 
     uint8_t* getMappedHostPointer(VkDeviceMemory memory) {
@@ -8401,7 +8463,14 @@ class VkDecoderGlobalState::Impl {
 
     VkResult dispatchVkQueueSubmit(VulkanDispatch* vk, VkQueue unboxed_queue, uint32_t submitCount,
                                    const VkSubmitInfo2* pSubmits, VkFence fence) {
-        VkResult res = vk->vkQueueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
+        VkResult res = VK_SUCCESS;
+        if (vk->vkQueueSubmit2) {
+            res = vk->vkQueueSubmit2(unboxed_queue, submitCount, pSubmits, fence);
+        } else if (vk->vkQueueSubmit2KHR) {
+            res = vk->vkQueueSubmit2KHR(unboxed_queue, submitCount, pSubmits, fence);
+        } else {
+            GFXSTREAM_FATAL("%s: function implementation cannot be found!", __func__);
+        }
         if (res != VK_SUCCESS) {
             GFXSTREAM_VERBOSE("vkQueueSubmit2 failed with %s [%d]", string_VkResult(res), res);
             return res;
@@ -12210,6 +12279,14 @@ void VkDecoderGlobalState::on_vkGetPhysicalDeviceQueueFamilyProperties2(
         pool, apiCallHandle, physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
 }
 
+void VkDecoderGlobalState::on_vkGetPhysicalDeviceQueueFamilyProperties2KHR(
+    gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
+    VkPhysicalDevice physicalDevice, uint32_t* pQueueFamilyPropertyCount,
+    VkQueueFamilyProperties2* pQueueFamilyProperties) {
+    mImpl->on_vkGetPhysicalDeviceQueueFamilyProperties2(
+        pool, apiCallHandle, physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+}
+
 VkResult VkDecoderGlobalState::on_vkQueuePresentKHR(gfxstream::base::BumpPool* pool,
                                                     VkSnapshotApiCallHandle apiCallHandle,
                                                     VkQueue queue,
@@ -12812,6 +12889,13 @@ void VkDecoderGlobalState::on_vkCmdPipelineBarrier2(gfxstream::base::BumpPool* p
     mImpl->on_vkCmdPipelineBarrier2(pool, apiCallHandle, commandBuffer, pDependencyInfo);
 }
 
+void VkDecoderGlobalState::on_vkCmdPipelineBarrier2KHR(gfxstream::base::BumpPool* pool,
+                                                       VkSnapshotApiCallHandle apiCallHandle,
+                                                       VkCommandBuffer commandBuffer,
+                                                       const VkDependencyInfo* pDependencyInfo) {
+    mImpl->on_vkCmdPipelineBarrier2(pool, apiCallHandle, commandBuffer, pDependencyInfo);
+}
+
 void VkDecoderGlobalState::on_vkCmdWaitEvents(
     gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
     VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent* pEvents,
@@ -12866,10 +12950,40 @@ VkResult VkDecoderGlobalState::on_vkMapMemory(gfxstream::base::BumpPool* pool,
     return mImpl->on_vkMapMemory(pool, apiCallHandle, device, memory, offset, size, flags, ppData);
 }
 
+VkResult VkDecoderGlobalState::on_vkMapMemory2(gfxstream::base::BumpPool* pool,
+                                               VkSnapshotApiCallHandle apiCallHandle,
+                                               VkDevice device,
+                                               const VkMemoryMapInfo* pMemoryMapInfo,
+                                               void** ppData) {
+    return mImpl->on_vkMapMemory2(pool, apiCallHandle, device, pMemoryMapInfo, ppData);
+}
+
+VkResult VkDecoderGlobalState::on_vkMapMemory2KHR(gfxstream::base::BumpPool* pool,
+                                                  VkSnapshotApiCallHandle apiCallHandle,
+                                                  VkDevice device,
+                                                  const VkMemoryMapInfo* pMemoryMapInfo,
+                                                  void** ppData) {
+    return mImpl->on_vkMapMemory2(pool, apiCallHandle, device, pMemoryMapInfo, ppData);
+}
+
 void VkDecoderGlobalState::on_vkUnmapMemory(gfxstream::base::BumpPool* pool,
                                             VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
                                             VkDeviceMemory memory) {
     mImpl->on_vkUnmapMemory(pool, apiCallHandle, device, memory);
+}
+
+VkResult VkDecoderGlobalState::on_vkUnmapMemory2(gfxstream::base::BumpPool* pool,
+                                                 VkSnapshotApiCallHandle apiCallHandle,
+                                                 VkDevice device,
+                                                 const VkMemoryUnmapInfo* pMemoryUnmapInfo) {
+    return mImpl->on_vkUnmapMemory2(pool, apiCallHandle, device, pMemoryUnmapInfo);
+}
+
+VkResult VkDecoderGlobalState::on_vkUnmapMemory2KHR(gfxstream::base::BumpPool* pool,
+                                                    VkSnapshotApiCallHandle apiCallHandle,
+                                                    VkDevice device,
+                                                    const VkMemoryUnmapInfo* pMemoryUnmapInfo) {
+    return mImpl->on_vkUnmapMemory2(pool, apiCallHandle, device, pMemoryUnmapInfo);
 }
 
 uint8_t* VkDecoderGlobalState::getMappedHostPointer(VkDeviceMemory memory) {
@@ -13000,6 +13114,13 @@ VkResult VkDecoderGlobalState::on_vkQueueSubmit2(gfxstream::base::BumpPool* pool
                                                  VkSnapshotApiCallHandle apiCallHandle, VkQueue queue,
                                                  uint32_t submitCount,
                                                  const VkSubmitInfo2* pSubmits, VkFence fence) {
+    return mImpl->on_vkQueueSubmit(pool, apiCallHandle, queue, submitCount, pSubmits, fence);
+}
+
+VkResult VkDecoderGlobalState::on_vkQueueSubmit2KHR(gfxstream::base::BumpPool* pool,
+                                                    VkSnapshotApiCallHandle apiCallHandle,
+                                                    VkQueue queue, uint32_t submitCount,
+                                                    const VkSubmitInfo2* pSubmits, VkFence fence) {
     return mImpl->on_vkQueueSubmit(pool, apiCallHandle, queue, submitCount, pSubmits, fence);
 }
 
