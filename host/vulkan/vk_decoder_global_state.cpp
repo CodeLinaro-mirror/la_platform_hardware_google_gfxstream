@@ -36,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/goldfish_vk_deepcopy.h"
@@ -2045,6 +2046,9 @@ class VkDecoderGlobalState::Impl {
             if (vulkan14Features) {
                 vulkan14Features->hostImageCopy = VK_FALSE;
             }
+            if (m_vkEmulation->isShaderFloatControls2Disabled()) {
+                vk_util::clearShaderFloatControls2Features(pFeatures);
+            }
 
             if (enableProtectedMemoryEmulation() ) {
                 if (protectedMemoryFeatures) {
@@ -2168,23 +2172,6 @@ class VkDecoderGlobalState::Impl {
             vk_find_struct<VkPhysicalDeviceExternalImageFormatInfo>(pImageFormatInfo);
 
         if (extImageFormatInfo) {
-            if (extImageFormatInfo->handleType &
-                VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
-                VkFormat resolvedFormat = resolveAhbFormat(pImageFormatInfo->format);
-                std::unique_ptr<VkImageCreateInfo> colorBufferVkImageCi =
-                    m_vkEmulation->generateColorBufferVkImageCreateInfo(
-                        resolvedFormat, 1, 1, pImageFormatInfo->tiling, 1);
-                if (colorBufferVkImageCi) {
-                    if (pImageFormatInfo != &imageFormatInfo) {
-                        imageFormatInfo = *pImageFormatInfo;
-                        pImageFormatInfo = &imageFormatInfo;
-                    }
-                    imageFormatInfo.format = resolvedFormat;
-                    imageFormatInfo.flags |= colorBufferVkImageCi->flags;
-                    imageFormatInfo.usage |= colorBufferVkImageCi->usage;
-                }
-            }
-
             auto* mutExtImageFormatInfo =
                 const_cast<VkPhysicalDeviceExternalImageFormatInfo*>(extImageFormatInfo);
             mutExtImageFormatInfo->handleType =
@@ -2195,6 +2182,23 @@ class VkDecoderGlobalState::Impl {
                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
                 mutExtImageFormatInfo->handleType =
                     m_vkEmulation->getDefaultExternalMemoryHandleType();
+            }
+
+            if (mutExtImageFormatInfo->handleType &
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+                std::unique_ptr<VkImageCreateInfo> colorBufferVkImageCi =
+                    m_vkEmulation->generateColorBufferVkImageCreateInfo(
+                        pImageFormatInfo->format, 1, 1, pImageFormatInfo->tiling, 1);
+                if (!colorBufferVkImageCi) {
+                    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+                }
+                if (pImageFormatInfo != &imageFormatInfo) {
+                    imageFormatInfo = *pImageFormatInfo;
+                    pImageFormatInfo = &imageFormatInfo;
+                }
+                imageFormatInfo.format = colorBufferVkImageCi->format;
+                imageFormatInfo.flags |= colorBufferVkImageCi->flags;
+                imageFormatInfo.usage |= colorBufferVkImageCi->usage;
             }
         }
         VkResult res = VK_ERROR_INITIALIZATION_FAILED;
@@ -2558,12 +2562,25 @@ class VkDecoderGlobalState::Impl {
 
         // Remove all extensions that are not supported by the host codegen to prevent
         // guest to host compatibility issues:
-        const auto& supportedDeviceExtensions = GetDeviceExtensionsSupportedByCodegen();
+        std::unordered_set<std::string> allowedDeviceExtensions =
+            GetDeviceExtensionsSupportedByCodegen();
+
+        // In AndroidAHB mode, guest dmabufs are backed by AHardwareBuffers whose layout is
+        // chosen by gralloc, so native DRM format modifiers can't be honored. Hide the
+        // extension so the guest falls back to its DRM_FORMAT_MOD_LINEAR emulation.
+        if (m_vkEmulation->getExternalMemoryMode() == ExternalMemory::Mode::AndroidAHB) {
+            allowedDeviceExtensions.erase(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+        }
+
+        if (m_vkEmulation->isShaderFloatControls2Disabled()) {
+            allowedDeviceExtensions.erase(VK_KHR_SHADER_FLOAT_CONTROLS_2_EXTENSION_NAME);
+        }
+
         properties.erase(
             std::remove_if(properties.begin(), properties.end(),
                            [&](const VkExtensionProperties& extension) {
-                               return supportedDeviceExtensions.find(extension.extensionName) ==
-                                      supportedDeviceExtensions.end();
+                               return allowedDeviceExtensions.find(extension.extensionName) ==
+                                      allowedDeviceExtensions.end();
                            }),
             properties.end());
 
@@ -2658,6 +2675,13 @@ class VkDecoderGlobalState::Impl {
                                VkDevice* pDevice) {
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
+
+        if (m_vkEmulation->isShaderFloatControls2Disabled()) {
+            VkResult validationRes = vk_util::validateShaderFloatControls2CreateInfo(pCreateInfo);
+            if (validationRes != VK_SUCCESS) {
+                return validationRes;
+            }
+        }
 
         std::vector<const char*> updatedDeviceExtensions =
             filteredDeviceExtensionNames(vk, physicalDevice, pCreateInfo->enabledExtensionCount,
@@ -2793,6 +2817,18 @@ class VkDecoderGlobalState::Impl {
             for (uint32_t i = 0; i < createInfoFiltered.queueCreateInfoCount; i++) {
                 (const_cast<VkDeviceQueueCreateInfo*>(createInfoFiltered.pQueueCreateInfos))[i]
                     .flags &= ~VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT;
+            }
+        }
+
+        if (!m_vkEmulation->getFeatures().BypassVulkanDeviceFeatureOverrides.enabled()) {
+            VkPhysicalDeviceHostImageCopyFeatures* hostImageCopyFeatures =
+                vk_find_struct<VkPhysicalDeviceHostImageCopyFeatures>(&createInfoFiltered);
+            VkPhysicalDeviceVulkan14Features* vulkan14Features =
+                vk_find_struct<VkPhysicalDeviceVulkan14Features>(&createInfoFiltered);
+            if ((hostImageCopyFeatures != nullptr && hostImageCopyFeatures->hostImageCopy) ||
+                (vulkan14Features != nullptr && vulkan14Features->hostImageCopy)) {
+                GFXSTREAM_INFO("%s: Unsupported hostImageCopy feature is requested!", __func__);
+                return VK_ERROR_FEATURE_NOT_PRESENT;
             }
         }
 
@@ -3785,8 +3821,10 @@ class VkDecoderGlobalState::Impl {
             VkMemoryRequirements probeReqs = {};
             vk->vkGetImageMemoryRequirements(device, *pImage, &probeReqs);
             // Only intervene where the driver actually refused to answer. A driver that reports a
-            // real size needs no help from us, and substituting there would be a regression.
-            if (probeReqs.size == 0) {
+            // real size and valid memoryTypeBits needs no help from us, and substituting there
+            // would be a regression. Some drivers report size=0 (linear) or memoryTypeBits=0
+            // (optimal) until the AHB is bound.
+            if (probeReqs.size == 0 || probeReqs.memoryTypeBits == 0) {
                 AHardwareBuffer* rawAhb = allocAhb(pCreateInfo);
                 if (rawAhb) {
                     VkAndroidHardwareBufferPropertiesANDROID ahbProps = {
@@ -3809,7 +3847,8 @@ class VkDecoderGlobalState::Impl {
                         // knows its own stride (in pixels), so derive the byte pitch from it.
                         AHardwareBuffer_Desc ahbDesc = {};
                         AHardwareBuffer_describe(rawAhb, &ahbDesc);
-                        uint32_t bytesPerPixel = 4;  // allocAhb only ever picks 32-bit RGBA/BGRA
+                        const uint32_t bytesPerPixel =
+                            vk_util::ahbFormatBytesPerPixel(ahbDesc.format);
                         imageInfo.deferredLayout.rowPitch =
                             static_cast<VkDeviceSize>(ahbDesc.stride) * bytesPerPixel;
                         // Also offer this AHB to a same-shaped ColorBuffer's own allocation,
@@ -3819,10 +3858,11 @@ class VkDecoderGlobalState::Impl {
                         m_vkEmulation->stashPendingDeferredLayoutAhb(pCreateInfo, rawAhb);
                         GFXSTREAM_INFO(
                             "DL-AHB tracked image=%p size=%llu typeBits=0x%x rowPitch=%llu "
-                            "ahbStridePx=%u (driver said size=0)",
+                            "ahbStridePx=%u (driver said size=%llu typeBits=0x%x)",
                             (void*)*pImage, (unsigned long long)imageInfo.deferredLayout.size,
                             imageInfo.deferredLayout.memoryTypeBits,
-                            (unsigned long long)imageInfo.deferredLayout.rowPitch, ahbDesc.stride);
+                            (unsigned long long)imageInfo.deferredLayout.rowPitch, ahbDesc.stride,
+                            (unsigned long long)probeReqs.size, probeReqs.memoryTypeBits);
                     } else {
                         GFXSTREAM_ERROR(
                             "DL-AHB properties query failed (res=%d size=%llu); leaving "
@@ -6328,6 +6368,19 @@ class VkDecoderGlobalState::Impl {
         auto& physicalDeviceMemHelper = physicalDeviceInfo->memoryPropertiesHelper;
         updateImageMemoryRequirementsLocked(device, pInfo->image,
                                             &pMemoryRequirements->memoryRequirements);
+#ifdef __ANDROID__
+        if (auto* dedicatedReqs =
+                vk_find_struct<VkMemoryDedicatedRequirements>(pMemoryRequirements)) {
+            auto* imageInfo = gfxstream::base::find(mImageInfo, pInfo->image);
+            if (imageInfo &&
+                (imageInfo->deferredLayout.size > 0 ||
+                 (imageInfo->externalHandleTypes &
+                  VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID))) {
+                dedicatedReqs->prefersDedicatedAllocation = VK_TRUE;
+                dedicatedReqs->requiresDedicatedAllocation = VK_TRUE;
+            }
+        }
+#endif
         physicalDeviceMemHelper->transformToGuestImageMemoryRequirements(
             imageTilingLocked(pInfo->image), &pMemoryRequirements->memoryRequirements);
     }
@@ -7167,6 +7220,8 @@ class VkDecoderGlobalState::Impl {
             vk_find_struct<VkImportColorBufferGOOGLE>(pAllocateInfo);
         const VkImportBufferGOOGLE* importBufferInfoPtr =
             vk_find_struct<VkImportBufferGOOGLE>(pAllocateInfo);
+        const bool importEmulatedExternalMemory =
+            importCbInfoPtr || importBufferInfoPtr;
 
         const VkCreateBlobGOOGLE* createBlobInfoPtr =
             vk_find_struct<VkCreateBlobGOOGLE>(pAllocateInfo);
@@ -7322,7 +7377,9 @@ class VkDecoderGlobalState::Impl {
 #elif defined(__ANDROID__)
                     importInfo.buffer = static_cast<AHardwareBuffer*>(
                         reinterpret_cast<void*>(dupHandleInfo->handle));
-                    vk_append_struct(&structChainIter, &importInfo);
+                    if (importInfo.buffer != nullptr) {
+                        vk_append_struct(&structChainIter, &importInfo);
+                    }
 #else
                     importFdInfo.fd = dupHandleInfo->getFd();
                     vk_append_struct(&structChainIter, &importFdInfo);
@@ -7441,8 +7498,11 @@ class VkDecoderGlobalState::Impl {
                 hasDeviceExtension(device, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
 
             const auto hostMemoryInfoOpt =
-                physicalDeviceInfo->memoryPropertiesHelper
-                    ->getHostMemoryInfoFromGuestMemoryTypeIndex(localAllocInfo.memoryTypeIndex);
+                importEmulatedExternalMemory
+                    ? physicalDeviceInfo->memoryPropertiesHelper
+                              ->getHostMemoryInfoFromHostMemoryTypeIndex(localAllocInfo.memoryTypeIndex)
+                    : physicalDeviceInfo->memoryPropertiesHelper
+                          ->getHostMemoryInfoFromGuestMemoryTypeIndex(localAllocInfo.memoryTypeIndex);
             if (!hostMemoryInfoOpt) {
                 GFXSTREAM_ERROR("Failed to get host memory info.");
                 return VK_ERROR_INCOMPATIBLE_DRIVER;
@@ -7483,9 +7543,13 @@ class VkDecoderGlobalState::Impl {
         //    buffers are not mapped by the guest, so no actual issues have been observed.
         //  * For complete correctness, we may need "getGuestOsLogic" logic somewhere in
         //    the future.
+        bool skipHostMapForAndroidAhb = false;
+#if defined(__ANDROID__)
+        skipHostMapForAndroidAhb = (importInfo.buffer != nullptr);
+#endif
         const bool hostVisible = memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-        bool importEmulatedExternalMemory = importCbInfoPtr || importBufferInfoPtr;
-        const bool emulateHostVisible = hostVisible && !importEmulatedExternalMemory;
+        const bool emulateHostVisible =
+            hostVisible && !importEmulatedExternalMemory && !skipHostMapForAndroidAhb;
 
         std::optional<SharedMemory> sharedMemory = std::nullopt;
         std::optional<VkExportMemoryAllocateInfo> exportAllocateInfo;
@@ -7741,7 +7805,7 @@ class VkDecoderGlobalState::Impl {
         bool needToMap =
             (!m_vkEmulation->getFeatures().ExternalBlob.enabled() ||
              (deviceInfo->useAstcCpuDecompression && deviceInfo->emulateTextureAstc)) &&
-            !createBlobInfoPtr;
+            !createBlobInfoPtr && !skipHostMapForAndroidAhb;
 
         // Some cases provide a mappedPtr, so we only map if we still don't have a pointer here.
         if (!mappedPtr && needToMap) {
@@ -8231,7 +8295,7 @@ class VkDecoderGlobalState::Impl {
                 info->needUnmap = true;
             }
 
-            auto exportedMemoryOpt = exportMemoryHandle(deviceInfo, vk, device, memory);
+            auto exportedMemoryOpt = exportMemoryHandle(deviceInfo, vk, device, memory, info);
             if (!exportedMemoryOpt) {
                 return VK_ERROR_OUT_OF_HOST_MEMORY;
             }
@@ -10927,22 +10991,6 @@ class VkDecoderGlobalState::Impl {
         }
     }
 
-    VkFormat resolveAhbFormat(VkFormat format) {
-        // Use UNORM formats for SRGB format requests.
-        switch (format) {
-            case VK_FORMAT_R8G8B8A8_SRGB:
-                return VK_FORMAT_R8G8B8A8_UNORM;
-            case VK_FORMAT_R8G8B8_SRGB:
-                return VK_FORMAT_R8G8B8_UNORM;
-            case VK_FORMAT_B8G8R8A8_SRGB:
-                return VK_FORMAT_B8G8R8A8_UNORM;
-            case VK_FORMAT_R8_SRGB:
-                return VK_FORMAT_R8_UNORM;
-            default:
-                return format;
-        }
-    }
-
     void transformImpl_VkImageCreateInfo_tohost(const VkImageCreateInfo* pImageCreateInfos,
                                                 uint32_t count) {
         for (uint32_t i = 0; i < count; i++) {
@@ -10950,18 +10998,24 @@ class VkDecoderGlobalState::Impl {
                 const_cast<VkImageCreateInfo&>(pImageCreateInfos[i]);
             VkExternalMemoryImageCreateInfo* pExternalMemoryImageCi =
                 vk_find_struct<VkExternalMemoryImageCreateInfo>(&imageCreateInfo);
-            bool importAndroidHardwareBuffer =
-                pExternalMemoryImageCi &&
-                (pExternalMemoryImageCi->handleTypes &
-                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID);
             const VkNativeBufferANDROID* pNativeBufferANDROID =
                 vk_find_struct<VkNativeBufferANDROID>(&imageCreateInfo);
 
             if (pExternalMemoryImageCi && pExternalMemoryImageCi->handleTypes &
                                               VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
-                pExternalMemoryImageCi->handleTypes |=
+                const VkExternalMemoryHandleTypeFlagBits defaultHandleType =
                     m_vkEmulation->getDefaultExternalMemoryHandleType();
+                if (defaultHandleType ==
+                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
+                    pExternalMemoryImageCi->handleTypes &=
+                        ~VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                }
+                pExternalMemoryImageCi->handleTypes |= defaultHandleType;
             }
+            bool importAndroidHardwareBuffer =
+                pExternalMemoryImageCi &&
+                (pExternalMemoryImageCi->handleTypes &
+                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID);
 
             // If the VkImage is going to bind to a ColorBuffer, we have to make sure the VkImage
             // that backs the ColorBuffer is created with identical parameters. From the spec: If
@@ -10983,7 +11037,7 @@ class VkDecoderGlobalState::Impl {
                 // to-be-created VkImage will bind to, so we try our best to infer the creation
                 // parameters.
                 colorBufferVkImageCi = m_vkEmulation->generateColorBufferVkImageCreateInfo(
-                    resolvedFormat, imageCreateInfo.extent.width, imageCreateInfo.extent.height,
+                    imageCreateInfo.format, imageCreateInfo.extent.width, imageCreateInfo.extent.height,
                     imageCreateInfo.tiling, imageCreateInfo.mipLevels);
                 importSourceDebug = "AHardwareBuffer";
             } else if (pNativeBufferANDROID) {
@@ -11357,10 +11411,11 @@ class VkDecoderGlobalState::Impl {
             return;
         }
 #ifdef __ANDROID__
-        // A driver that defers an AHB-external image's layout answers size=0 until bind. Answer
-        // with what the image's own AHB needs instead. Host memory type indices here; the caller
-        // must still run transformToGuestMemoryRequirements afterwards.
-        if (pMemoryRequirements && pMemoryRequirements->size == 0 &&
+        // A driver that defers an AHB-external image's layout answers size=0 or memoryTypeBits=0
+        // until bind. Answer with what the image's own AHB needs instead. Host memory type
+        // indices here; the caller must still run transformToGuestMemoryRequirements afterwards.
+        if (pMemoryRequirements &&
+            (pMemoryRequirements->size == 0 || pMemoryRequirements->memoryTypeBits == 0) &&
             imageInfo->deferredLayout.size > 0) {
             pMemoryRequirements->size = imageInfo->deferredLayout.size;
             pMemoryRequirements->alignment = imageInfo->deferredLayout.alignment;
@@ -11463,7 +11518,8 @@ class VkDecoderGlobalState::Impl {
 
     std::optional<BlobDescriptorType> exportMemoryHandle(struct DeviceInfo* deviceInfo,
                                                          VulkanDispatch* vk, VkDevice device,
-                                                         VkDeviceMemory memory) {
+                                                         VkDeviceMemory memory,
+                                                         const MemoryInfo* info) {
         BlobDescriptorType ret;
 
         const auto extMemMode = m_vkEmulation->getExternalMemoryMode();
@@ -11529,6 +11585,9 @@ class VkDecoderGlobalState::Impl {
 #endif
 #ifdef __ANDROID__
             case ExternalMemory::Mode::AndroidAHB: {
+                if (info && info->boundColorBuffer.has_value()) {
+                    return m_vkEmulation->dupColorBufferExtMemoryHandle(*info->boundColorBuffer);
+                }
                 if (!vk->vkGetMemoryAndroidHardwareBufferANDROID) {
                     GFXSTREAM_ERROR("%s: External memory function not supported.", __func__);
                     return std::nullopt;
