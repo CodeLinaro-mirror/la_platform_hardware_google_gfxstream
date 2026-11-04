@@ -65,6 +65,7 @@ class VkDecoderSnapshot {
 
     VkSnapshotApiCallHandle createApiCallInfo();
     void destroyApiCallInfoIfUnused(VkSnapshotApiCallHandle handle);
+    bool hasApiCall(VkSnapshotApiCallHandle handle) const;
 
     // Performs bookkeeping to track that a given api call created the given VkObject handles.
     // This is a public function so that `VkDecoderGlobalState` can inform snapshot of any
@@ -1923,32 +1924,6 @@ class VkDecoderSnapshot {
                               VkStencilFaceFlags faceMask, VkStencilOp failOp, VkStencilOp passOp,
                               VkStencilOp depthFailOp, VkCompareOp compareOp);
 #endif
-#ifdef VK_EXT_host_image_copy
-    void vkCopyMemoryToImageEXT(gfxstream::base::BumpPool* pool,
-                                VkSnapshotApiCallHandle apiCallHandle, const uint8_t* apiCallPacket,
-                                size_t apiCallPacketSize, VkResult input_result, VkDevice device,
-                                const VkCopyMemoryToImageInfo* pCopyMemoryToImageInfo);
-    void vkCopyImageToMemoryEXT(gfxstream::base::BumpPool* pool,
-                                VkSnapshotApiCallHandle apiCallHandle, const uint8_t* apiCallPacket,
-                                size_t apiCallPacketSize, VkResult input_result, VkDevice device,
-                                const VkCopyImageToMemoryInfo* pCopyImageToMemoryInfo);
-    void vkCopyImageToImageEXT(gfxstream::base::BumpPool* pool,
-                               VkSnapshotApiCallHandle apiCallHandle, const uint8_t* apiCallPacket,
-                               size_t apiCallPacketSize, VkResult input_result, VkDevice device,
-                               const VkCopyImageToImageInfo* pCopyImageToImageInfo);
-    void vkTransitionImageLayoutEXT(gfxstream::base::BumpPool* pool,
-                                    VkSnapshotApiCallHandle apiCallHandle,
-                                    const uint8_t* apiCallPacket, size_t apiCallPacketSize,
-                                    VkResult input_result, VkDevice device,
-                                    uint32_t transitionCount,
-                                    const VkHostImageLayoutTransitionInfo* pTransitions);
-    void vkGetImageSubresourceLayout2EXT(gfxstream::base::BumpPool* pool,
-                                         VkSnapshotApiCallHandle apiCallHandle,
-                                         const uint8_t* apiCallPacket, size_t apiCallPacketSize,
-                                         VkDevice device, VkImage image,
-                                         const VkImageSubresource2* pSubresource,
-                                         VkSubresourceLayout2* pLayout);
-#endif
 #ifdef VK_EXT_swapchain_maintenance1
     void vkReleaseSwapchainImagesEXT(gfxstream::base::BumpPool* pool,
                                      VkSnapshotApiCallHandle apiCallHandle,
@@ -1978,6 +1953,14 @@ class VkDecoderSnapshot {
                              const uint8_t* apiCallPacket, size_t apiCallPacketSize,
                              VkDevice device, VkObjectType objectType, uint64_t objectHandle,
                              VkPrivateDataSlot privateDataSlot, uint64_t* pData);
+#endif
+#ifdef VK_EXT_image_compression_control
+    void vkGetImageSubresourceLayout2EXT(gfxstream::base::BumpPool* pool,
+                                         VkSnapshotApiCallHandle apiCallHandle,
+                                         const uint8_t* apiCallPacket, size_t apiCallPacketSize,
+                                         VkDevice device, VkImage image,
+                                         const VkImageSubresource2* pSubresource,
+                                         VkSubresourceLayout2* pLayout);
 #endif
 #ifdef VK_EXT_extended_dynamic_state2
     void vkCmdSetPatchControlPointsEXT(gfxstream::base::BumpPool* pool,

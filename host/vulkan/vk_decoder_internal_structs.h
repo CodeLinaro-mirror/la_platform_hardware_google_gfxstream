@@ -177,6 +177,7 @@ struct MemoryInfo {
     uint64_t sizeToPage = 0;
     uint64_t hostmemId = 0;
     VkDevice device = VK_NULL_HANDLE;
+    VkDeviceMemory boxed = VK_NULL_HANDLE;
     uint32_t memoryIndex = 0;
     // Set if the memory is backed by shared memory.
     std::optional<gfxstream::base::SharedMemory> sharedMemory;
@@ -222,6 +223,11 @@ struct InstanceInfo {
     std::unique_ptr<VVLContext> debugContext;
     VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
     VkGuestCapabilityFlagsGOOGLE guestCapabilities = 0;
+    // Boxed handles of the physical devices exposed to the guest for this
+    // instance, in enumeration order. Populated on the first
+    // vkEnumeratePhysicalDevices call, returned as-is on later calls, and
+    // released when the instance is destroyed.
+    std::vector<VkPhysicalDevice> boxedPhysicalDevices;
 
     bool hasGuestCapability(VkGuestCapabilityFlagBitsGOOGLE capability) const {
         return (guestCapabilities & capability) != 0;
@@ -233,7 +239,6 @@ struct PhysicalDeviceInfo {
     VkPhysicalDeviceProperties props;
     std::unique_ptr<EmulatedPhysicalDeviceMemoryProperties> memoryPropertiesHelper;
     std::unique_ptr<EmulatedPhysicalDeviceQueueProperties> queuePropertiesHelper;
-    VkPhysicalDevice boxed = nullptr;
 };
 
 struct ExternalFenceInfo {
@@ -350,6 +355,7 @@ struct QueueInfo {
 
 struct BufferInfo {
     VkDevice device;
+    VkBuffer boxed = VK_NULL_HANDLE;
     VkBufferUsageFlags usage;
     VkDeviceMemory memory = 0;
     VkDeviceSize memoryOffset = 0;
@@ -417,6 +423,7 @@ struct SamplerInfo {
                                      &other.createInfo, &createInfo);
         device = other.device;
         needEmulatedAlpha = other.needEmulatedAlpha;
+        boxed = other.boxed;
         emulatedborderSampler = other.emulatedborderSampler;
         return *this;
     }
@@ -503,6 +510,8 @@ struct DescriptorSetLayoutInfo {
 };
 
 struct DescriptorUpdateTemplateInfo {
+    VkDevice device = VK_NULL_HANDLE;
+    VkDescriptorUpdateTemplate boxed = VK_NULL_HANDLE;
     VkDescriptorUpdateTemplateCreateInfo createInfo;
     std::vector<VkDescriptorUpdateTemplateEntry> linearizedTemplateEntries;
     // Preallocated pData
@@ -593,31 +602,38 @@ struct DescriptorSetInfo {
 
 struct ShaderModuleInfo {
     VkDevice device;
+    VkShaderModule boxed = VK_NULL_HANDLE;
 };
 
 struct SamplerYcbcrConversionInfo {
     VkDevice device;
+    VkSamplerYcbcrConversion boxed = VK_NULL_HANDLE;
 };
 
 struct PipelineCacheInfo {
     VkDevice device;
+    VkPipelineCache boxed = VK_NULL_HANDLE;
 };
 
 struct PipelineLayoutInfo {
     VkDevice device;
+    VkPipelineLayout boxed = VK_NULL_HANDLE;
 };
 
 struct PipelineInfo {
     VkDevice device;
+    VkPipeline boxed = VK_NULL_HANDLE;
 };
 
 struct RenderPassInfo {
     VkDevice device;
+    VkRenderPass boxed = VK_NULL_HANDLE;
     std::vector<VkImageLayout> attachmentFinalLayouts;
 };
 
 struct FramebufferInfo {
     VkDevice device;
+    VkFramebuffer boxed = VK_NULL_HANDLE;
     std::vector<HandleType> attachedColorBuffers;
     std::vector<VkImage> attachedImages;
 };
@@ -680,6 +696,8 @@ struct InstanceObjects {
         std::unordered_map<VkDescriptorPool, DescriptorPoolInfo> descriptorPools;
         std::unordered_map<VkDescriptorSet, DescriptorSetInfo> descriptorSets;
         std::unordered_map<VkDescriptorSetLayout, DescriptorSetLayoutInfo> descriptorSetLayouts;
+        std::unordered_map<VkDescriptorUpdateTemplate, DescriptorUpdateTemplateInfo>
+            descriptorUpdateTemplates;
         std::unordered_map<VkDeviceMemory, MemoryInfo> memories;
         std::unordered_map<VkFence, FenceInfo> fences;
         std::unordered_map<VkFramebuffer, FramebufferInfo> framebuffers;
