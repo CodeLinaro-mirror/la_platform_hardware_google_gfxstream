@@ -221,6 +221,7 @@ class VkEmulation {
     UdmabufCreator* getUdmabufCreator();
 
     VkInstance getInstance();
+    VulkanDispatch* getGlobalVkDispatch() const { return mGvk; }
 
     std::string getGpuVendor() const;
     std::string getGpuName() const;

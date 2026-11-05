@@ -232,11 +232,11 @@ struct VkDecoderGlobalStateTestPeer {
     // the first vkEnumeratePhysicalDevices call had populated them. Returns
     // the boxed instance handle.
     VkInstance registerInstanceWithPhysicalDevicesForCleanupTest(
-        VulkanDispatch* globalVk, VkInstance unboxedInstance,
+        VulkanDispatch* globalVk, VulkanDispatch* instanceVk, VkInstance unboxedInstance,
         const std::vector<VkPhysicalDevice>& unboxedPhysicalDevices,
         std::vector<VkPhysicalDevice> boxedPhysicalDevices) {
         impl.m_vk = globalVk;
-        VkInstance boxedInstance = new_boxed_VkInstance(unboxedInstance, globalVk);
+        VkInstance boxedInstance = new_boxed_VkInstance(unboxedInstance, instanceVk);
 
         std::lock_guard<std::mutex> lock(impl.mMutex);
         InstanceInfo& instanceInfo = impl.mInstanceInfo[unboxedInstance];
@@ -599,9 +599,11 @@ TEST(VkDecoderGlobalStateProcessCleanupLeakTest, DeviceCleanupDeletesAllExtracte
 
     static int sDestroyCalls = 0;
     sDestroyCalls = 0;
+    // Direct ICD loading leaves non-global entry points (such as vkDestroyDevice)
+    // null on the global dispatch table; cleanup must use the device dispatch.
     VulkanDispatch globalVk = {};
-    globalVk.vkDestroyDevice = [](VkDevice, const VkAllocationCallbacks*) { ++sDestroyCalls; };
     VulkanDispatch deviceVk = {};
+    deviceVk.vkDestroyDevice = [](VkDevice, const VkAllocationCallbacks*) { ++sDestroyCalls; };
     deviceVk.vkDeviceWaitIdle = [](VkDevice) -> VkResult { return VK_SUCCESS; };
     deviceVk.vkDestroyBuffer = [](VkDevice, VkBuffer, const VkAllocationCallbacks*) {
         ++sDestroyCalls;
@@ -670,8 +672,11 @@ TEST(VkDecoderGlobalStateProcessCleanupLeakTest,
 
     static int sDestroyedInstances = 0;
     sDestroyedInstances = 0;
+    // Direct ICD loading leaves vkDestroyInstance null on the global dispatch
+    // table; instance cleanup must dispatch through the boxed instance table.
     VulkanDispatch globalVk = {};
-    globalVk.vkDestroyInstance = [](VkInstance, const VkAllocationCallbacks*) {
+    VulkanDispatch instanceVk = {};
+    instanceVk.vkDestroyInstance = [](VkInstance, const VkAllocationCallbacks*) {
         ++sDestroyedInstances;
     };
 
@@ -681,11 +686,11 @@ TEST(VkDecoderGlobalStateProcessCleanupLeakTest,
         reinterpret_cast<VkPhysicalDevice>(0xd003'0000ULL),
     };
     const std::vector<VkPhysicalDevice> boxedPhysicalDevices = {
-        new_boxed_VkPhysicalDevice(unboxedPhysicalDevices[0], &globalVk),
-        new_boxed_VkPhysicalDevice(unboxedPhysicalDevices[1], &globalVk),
+        new_boxed_VkPhysicalDevice(unboxedPhysicalDevices[0], &instanceVk),
+        new_boxed_VkPhysicalDevice(unboxedPhysicalDevices[1], &instanceVk),
     };
     VkInstance boxedInstance = peer.registerInstanceWithPhysicalDevicesForCleanupTest(
-        &globalVk, unboxedInstance, unboxedPhysicalDevices, boxedPhysicalDevices);
+        &globalVk, &instanceVk, unboxedInstance, unboxedPhysicalDevices, boxedPhysicalDevices);
     EXPECT_EQ(2u, peer.physicalDeviceInfoCount());
 
     // Count-only query reports every physical device without writing handles.
@@ -760,8 +765,8 @@ class VkDecoderGlobalStateSnapshotImageFlagsTest : public ::testing::Test {
         sObservedStencilUsage = 0;
         sNextImageId = 0xe100'0000ULL;
 
-        mGlobalVk.vkDestroyInstance = [](VkInstance, const VkAllocationCallbacks*) {};
-        mGlobalVk.vkDestroyDevice = [](VkDevice, const VkAllocationCallbacks*) {};
+        mInstanceVk.vkDestroyInstance = [](VkInstance, const VkAllocationCallbacks*) {};
+        mDeviceVk.vkDestroyDevice = [](VkDevice, const VkAllocationCallbacks*) {};
 
         // Device dispatch intentionally leaves physical-device entry points null, matching
         // vkGetDeviceProcAddr behavior per the Vulkan specification.
