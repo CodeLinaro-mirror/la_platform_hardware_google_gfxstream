@@ -964,7 +964,8 @@ std::unique_ptr<VkEmulation> VkEmulation::create(VulkanDispatch* gvk,
             GFXSTREAM_DEBUG("Found out that we can create a higher version instance.");
             appInfo.apiVersion = VK_MAKE_VERSION(1, 1, 0);
 
-            gvk->vkDestroyInstance(emulation->mInstance, nullptr);
+            ivk->vkDestroyInstance(emulation->mInstance, nullptr);
+            emulation->mInstance = VK_NULL_HANDLE;
 
             res = gvk->vkCreateInstance(&instCi, nullptr, &emulation->mInstance);
             if (res != VK_SUCCESS) {
@@ -1785,12 +1786,12 @@ VkEmulation::~VkEmulation() {
 
     mYcbcrSamplerPool.destroy();
 
-    if (mIvk && mDevice != VK_NULL_HANDLE) {
+    if (mIvk && mIvk->vkDestroyDevice && mDevice != VK_NULL_HANDLE) {
         mIvk->vkDestroyDevice(mDevice, nullptr);
     }
 
-    if (mGvk && mInstance != VK_NULL_HANDLE) {
-        mGvk->vkDestroyInstance(mInstance, nullptr);
+    if (mIvk && mIvk->vkDestroyInstance && mInstance != VK_NULL_HANDLE) {
+        mIvk->vkDestroyInstance(mInstance, nullptr);
     }
 
     delete mDvk;
@@ -2226,7 +2227,7 @@ bool VkEmulation::allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalM
     switch (getExternalMemoryMode()) {
         // For host-allocation external memory mode, allocate host side memory first, then import
         case ExternalMemory::Mode::HostAllocation: {
-            // TODO(b/409769371): use PrivateMemory?
+            // TODO(b/409769371): use HeapMemory?
             VkDeviceSize alignment = externalMemoryHostProperties().minImportedHostPointerAlignment;
             VkDeviceSize alignedSize = ALIGN(allocInfo.allocationSize, alignment);
 #ifdef _WIN32
