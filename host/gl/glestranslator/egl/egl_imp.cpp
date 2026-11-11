@@ -865,7 +865,11 @@ EGLAPI EGLBoolean EGLAPIENTRY eglDestroySurface(EGLDisplay display, EGLSurface s
     if(!srfc.get()) {
         RETURN_ERROR(EGL_FALSE,EGL_BAD_SURFACE);
     }
-    g_eglInfo->markSurfaceForDestroy(dpy, surface);
+    if (srfc->type() == EglSurface::WINDOW) {
+        dpy->removeSurface(surface);
+    } else {
+        g_eglInfo->markSurfaceForDestroy(dpy, surface);
+    }
     return EGL_TRUE;
 }
 
@@ -926,9 +930,10 @@ static EGLContext eglCreateOrLoadContext(EGLDisplay display, EGLConfig config,
                 minor_version = attrib_val;
                 break;
             case EGL_CONTEXT_FLAGS_KHR:
-                if ((attrib_val | EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR) ||
-                    (attrib_val | EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR)  ||
-                    (attrib_val | EGL_CONTEXT_OPENGL_ROBUST_ACCESS_BIT_KHR)) {
+                // Zero is the default; only bits this implementation does not know are invalid.
+                if (!(attrib_val & ~(EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR |
+                                     EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR |
+                                     EGL_CONTEXT_OPENGL_ROBUST_ACCESS_BIT_KHR))) {
                     context_flags = attrib_val;
                 } else {
                     fprintf(stderr, "%s: wrong context flags, return\n", __func__);
@@ -936,8 +941,9 @@ static EGLContext eglCreateOrLoadContext(EGLDisplay display, EGLConfig config,
                 }
                 break;
             case EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR:
-                if ((attrib_val | EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR) ||
-                    (attrib_val | EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR)) {
+                // Zero is accepted; only bits this implementation does not know are invalid.
+                if (!(attrib_val & ~(EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR |
+                                     EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR))) {
                     profile_mask = attrib_val;
                 } else {
                     fprintf(stderr, "%s: wrong profile mask, return\n", __func__);
