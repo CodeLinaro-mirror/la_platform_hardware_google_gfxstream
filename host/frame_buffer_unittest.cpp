@@ -28,6 +28,7 @@
 #include "gfxstream/host/features.h"
 #include "gfxstream/host/file_stream.h"
 #include "gfxstream/host/gfxstream_format.h"
+#include "gfxstream/host/hwc2.h"
 #include "gfxstream/host/mem_stream.h"
 #include "gfxstream/host/testing/GLSnapshotTesting.h"
 #include "gfxstream/host/testing/GLTestUtils.h"
@@ -40,6 +41,7 @@
 #include "gfxstream/host/graphics_driver_lock.h"
 #include "common/gles_pointer.h"
 #include "host/gl/gles2_dec/gles2_opcodes.h"
+#include "host/gl/emulated_egl_fence_sync.h"
 #include "host/gl/emulation_gl.h"
 #include "host/gl/yuv_converter.h"
 #include "host/vulkan/trivial_stream.h"
@@ -1322,12 +1324,71 @@ TEST_F(FrameBufferTest, CleanupProcGLObjects) {
     EXPECT_FALSE(mFb->getEmulationGl()->hasProcOwnedResources());
     EXPECT_FALSE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
 
-    // Verify fallback thread context tracking when puid == 0
+    // Verify fallback thread context and surface tracking when puid == 0
     HandleType threadContext = mFb->createEmulatedEglContext(0, 0, gl::GLESApi_2);
     EXPECT_NE((HandleType)0, threadContext);
+    HandleType threadSurface = mFb->createEmulatedEglWindowSurface(0, mWidth, mHeight);
+    EXPECT_NE((HandleType)0, threadSurface);
     EXPECT_TRUE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
-    mFb->getEmulationGl()->drainRenderThreadContexts();
+    mFb->drainGlRenderThreadResources();
     EXPECT_FALSE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
+}
+
+TEST_F(FrameBufferTest, CreateEmulatedEglFenceSyncWithoutCurrentContext) {
+    if (!mFb->hasEmulationGl()) {
+        GTEST_SKIP() << "GL emulation not enabled.";
+    }
+
+    auto& glInfo = *mRenderThreadInfo->m_glInfo;
+    ASSERT_EQ(nullptr, glInfo.currContext);
+    ASSERT_FALSE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
+
+    uint64_t sync = 0;
+    mFb->createEmulatedEglFenceSync(EGL_SYNC_FENCE_KHR, false, &sync);
+    EXPECT_NE(0u, sync);
+
+    EXPECT_NE(nullptr, glInfo.currContext);
+    EXPECT_EQ(1u, glInfo.m_contextSet.size());
+    EXPECT_EQ(1u, glInfo.m_windowSet.size());
+
+    gl::EmulatedEglFenceSync* fenceSync = gl::EmulatedEglFenceSync::getFromHandle(sync);
+    ASSERT_NE(nullptr, fenceSync);
+    fenceSync->decRef();
+
+    mFb->drainGlRenderThreadResources();
+    EXPECT_EQ(nullptr, glInfo.currContext);
+    EXPECT_TRUE(glInfo.m_contextSet.empty());
+    EXPECT_TRUE(glInfo.m_windowSet.empty());
+    EXPECT_FALSE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
+}
+
+TEST_F(FrameBufferTest, HeadlessPostAndDrainRenderThreadSurfaces) {
+    if (!mFb->hasEmulationGl()) {
+        GTEST_SKIP() << "GL emulation not enabled.";
+    }
+
+    HandleType postCb = mFb->createColorBuffer(mWidth, mHeight, GfxstreamFormat::R8G8B8A8_UNORM);
+    ASSERT_NE((HandleType)0, postCb);
+    EXPECT_EQ(0, mFb->openColorBuffer(postCb));
+    EXPECT_TRUE(mFb->post(postCb));
+    EXPECT_EQ(postCb, mFb->getLastPostedColorBuffer());
+    mFb->closeColorBuffer(postCb);
+
+    mRenderThreadInfo->setPuid(0);
+    HandleType surfaceCb = mFb->createColorBuffer(mWidth, mHeight, GfxstreamFormat::R8G8B8A8_UNORM);
+    ASSERT_NE((HandleType)0, surfaceCb);
+    EXPECT_EQ(0, mFb->openColorBuffer(surfaceCb));
+
+    HandleType surface = mFb->createEmulatedEglWindowSurface(0, mWidth, mHeight);
+    ASSERT_NE((HandleType)0, surface);
+    EXPECT_TRUE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
+    EXPECT_TRUE(mFb->setEmulatedEglWindowSurfaceColorBuffer(surface, surfaceCb));
+    EXPECT_EQ(surfaceCb, mFb->getEmulatedEglWindowSurfaceColorBufferHandle(surface));
+    mFb->closeColorBuffer(surfaceCb);
+
+    mFb->drainGlRenderThreadSurfaces();
+    EXPECT_FALSE(mFb->getEmulationGl()->hasContextsOrWindowSurfaces());
+    EXPECT_EQ((HandleType)0, mFb->getEmulatedEglWindowSurfaceColorBufferHandle(surface));
 }
 
 TEST_F(FrameBufferTest, CrossVersionRebindClearsContextData) {
@@ -1664,6 +1725,59 @@ TEST_F(FrameBufferTest, Gles2ValidateAtt0PreDrawLargeUintIndexDoesNotOverflow) {
     gl2.glDeleteBuffers(1, &ibo);
     EXPECT_TRUE(mFb->bindContext(0, 0, 0));
     mFb->destroyEmulatedEglContext(ctx2);
+    mFb->destroyEmulatedEglWindowSurface(surface);
+}
+
+TEST_F(FrameBufferTest, Gles3InvalidateFramebufferWithZeroAttachments) {
+    if (!mFb->hasEmulationGl()) {
+        GTEST_SKIP() << "GL emulation not enabled.";
+    }
+
+    HandleType ctx3 = mFb->createEmulatedEglContext(0, 0, gl::GLESApi_3_0);
+    ASSERT_NE((HandleType)0, ctx3);
+    HandleType surface = mFb->createEmulatedEglWindowSurface(0, mWidth, mHeight);
+    ASSERT_NE((HandleType)0, surface);
+    EXPECT_TRUE(mFb->bindContext(ctx3, surface, surface));
+
+    auto& gl2 = mRenderThreadInfo->m_glInfo->m_gl2Dec;
+    gl2.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    (void)gl2.glGetError();
+
+    // A count of 0 is a legal no-op. It used to index an empty std::vector, which hardened libc++
+    // turns into a trap that kills the emulator (b/582922278). The decoder always passes a
+    // non-null pointer, even for an empty list, so try that as well as a null one.
+    const GLenum unusedAttachment = GL_COLOR;
+    gl2.glInvalidateFramebuffer(GL_FRAMEBUFFER, 0, nullptr);
+    EXPECT_EQ((GLenum)GL_NO_ERROR, gl2.glGetError());
+    gl2.glInvalidateFramebuffer(GL_FRAMEBUFFER, 0, &unusedAttachment);
+    EXPECT_EQ((GLenum)GL_NO_ERROR, gl2.glGetError());
+    gl2.glInvalidateSubFramebuffer(GL_FRAMEBUFFER, 0, nullptr, 0, 0, 1, 1);
+    EXPECT_EQ((GLenum)GL_NO_ERROR, gl2.glGetError());
+    gl2.glInvalidateSubFramebuffer(GL_FRAMEBUFFER, 0, &unusedAttachment, 0, 0, 1, 1);
+    EXPECT_EQ((GLenum)GL_NO_ERROR, gl2.glGetError());
+
+    // A negative count is GL_INVALID_VALUE.
+    gl2.glInvalidateFramebuffer(GL_FRAMEBUFFER, -1, nullptr);
+    EXPECT_EQ((GLenum)GL_INVALID_VALUE, gl2.glGetError());
+    gl2.glInvalidateSubFramebuffer(GL_FRAMEBUFFER, -1, nullptr, 0, 0, 1, 1);
+    EXPECT_EQ((GLenum)GL_INVALID_VALUE, gl2.glGetError());
+
+    // Non-empty lists still reach the driver intact: GL_COLOR/GL_DEPTH/GL_STENCIL are translated
+    // for the emulated default framebuffer, and user FBO attachments are passed through as is.
+    const GLenum defaultFbAttachments[] = {GL_COLOR, GL_DEPTH, GL_STENCIL};
+    gl2.glInvalidateFramebuffer(GL_FRAMEBUFFER, 3, defaultFbAttachments);
+    EXPECT_EQ((GLenum)GL_NO_ERROR, gl2.glGetError());
+    GLuint fbo = 0;
+    gl2.glGenFramebuffers(1, &fbo);
+    gl2.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    const GLenum fboAttachment = GL_COLOR_ATTACHMENT0;
+    gl2.glInvalidateSubFramebuffer(GL_FRAMEBUFFER, 1, &fboAttachment, 0, 0, 1, 1);
+    EXPECT_EQ((GLenum)GL_NO_ERROR, gl2.glGetError());
+    gl2.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl2.glDeleteFramebuffers(1, &fbo);
+
+    EXPECT_TRUE(mFb->bindContext(0, 0, 0));
+    mFb->destroyEmulatedEglContext(ctx3);
     mFb->destroyEmulatedEglWindowSurface(surface);
 }
 
@@ -2249,6 +2363,251 @@ TEST_F(FrameBufferTest, Gles2MapAndUnmapBufferDirectRejectedWithInvalidOperation
     EXPECT_TRUE(mFb->bindContext(0, 0, 0));
     mFb->destroyEmulatedEglContext(ctx);
     mFb->destroyEmulatedEglWindowSurface(surface);
+}
+
+TEST_F(FrameBufferTest, ComposePostsTargetColorBufferWhenNeedPostIsTrue) {
+    HandleType targetHandle =
+        mFb->createColorBuffer(mWidth, mHeight, GfxstreamFormat::R8G8B8A8_UNORM);
+    ASSERT_NE((HandleType)0, targetHandle);
+    EXPECT_EQ(0, mFb->openColorBuffer(targetHandle));
+
+    struct PostContext {
+        int count = 0;
+        int width = 0;
+        int height = 0;
+    } postCtx;
+
+    mFb->setPostCallback(
+        [](void* context, uint32_t /*displayId*/, int width, int height, int /*ydir*/,
+           int /*format*/, int /*type*/, unsigned char* /*pixels*/) {
+            auto* ctx = static_cast<PostContext*>(context);
+            ++ctx->count;
+            ctx->width = width;
+            ctx->height = height;
+        },
+        &postCtx, /*displayId=*/0, /*useBgraReadback=*/false);
+
+    std::vector<uint8_t> composeBuf(sizeof(ComposeDevice_v2) + sizeof(ComposeLayer), 0);
+    auto* composeDev = reinterpret_cast<ComposeDevice_v2*>(composeBuf.data());
+    composeDev->version = 2;
+    composeDev->displayId = 0;
+    composeDev->targetHandle = targetHandle;
+    composeDev->numLayers = 1;
+    composeDev->layer[0].cbHandle = 0;
+    composeDev->layer[0].composeMode = HWC2_COMPOSITION_SOLID_COLOR;
+    composeDev->layer[0].displayFrame = {0, 0, mWidth, mHeight};
+    composeDev->layer[0].crop = {0.0f, 0.0f, static_cast<float>(mWidth),
+                                 static_cast<float>(mHeight)};
+    composeDev->layer[0].blendMode = HWC2_BLEND_MODE_NONE;
+    composeDev->layer[0].alpha = 1.0f;
+    composeDev->layer[0].color = {255, 0, 0, 255};
+    composeDev->layer[0].transform = HWC_TRANSFORM_NONE;
+
+    mFb->resetGuestPostedAFrame();
+    EXPECT_TRUE(
+        mFb->compose(static_cast<uint32_t>(composeBuf.size()), composeBuf.data(), /*post=*/false));
+    EXPECT_FALSE(mFb->hasGuestPostedAFrame());
+    EXPECT_EQ(0, postCtx.count);
+
+    std::vector<uint8_t> readPixels(static_cast<size_t>(mWidth) * mHeight * 4, 0);
+    mFb->readColorBuffer(targetHandle, 0, 0, mWidth, mHeight, GfxstreamFormat::R8G8B8A8_UNORM,
+                         readPixels.data(), readPixels.size());
+    EXPECT_EQ(255u, readPixels[0]);
+    EXPECT_EQ(0u, readPixels[1]);
+    EXPECT_EQ(0u, readPixels[2]);
+    EXPECT_EQ(255u, readPixels[3]);
+
+    EXPECT_TRUE(
+        mFb->compose(static_cast<uint32_t>(composeBuf.size()), composeBuf.data(), /*post=*/true));
+    EXPECT_TRUE(mFb->hasGuestPostedAFrame());
+    if (!mUseSubWindow) {
+        if (mFb->asyncReadbackSupported()) {
+            mFb->flushReadPipeline(0);
+        }
+        EXPECT_GE(postCtx.count, 1);
+        EXPECT_EQ(mWidth, postCtx.width);
+        EXPECT_EQ(mHeight, postCtx.height);
+    }
+
+    mFb->setPostCallback(nullptr, nullptr, /*displayId=*/0);
+    mFb->closeColorBuffer(targetHandle);
+}
+
+#if !defined(CONFIG_AEMU)
+// Without a subwindow or post callback (the virtio-gpu / stream_renderer path
+// and every non-emulator target), compose(post=true) must only compose: it
+// never posts.
+TEST_F(FrameBufferTest, ComposeWithNeedPostDoesNotPostWithoutPostCallback) {
+    if (mUseSubWindow) {
+        GTEST_SKIP() << "Subwindow mode posts directly to m_subWin without m_onPost";
+    }
+    HandleType targetHandle =
+        mFb->createColorBuffer(mWidth, mHeight, GfxstreamFormat::R8G8B8A8_UNORM);
+    ASSERT_NE((HandleType)0, targetHandle);
+    EXPECT_EQ(0, mFb->openColorBuffer(targetHandle));
+
+    std::vector<uint8_t> composeBuf(sizeof(ComposeDevice_v2) + sizeof(ComposeLayer), 0);
+    auto* composeDev = reinterpret_cast<ComposeDevice_v2*>(composeBuf.data());
+    composeDev->version = 2;
+    composeDev->displayId = 0;
+    composeDev->targetHandle = targetHandle;
+    composeDev->numLayers = 1;
+    composeDev->layer[0].cbHandle = 0;
+    composeDev->layer[0].composeMode = HWC2_COMPOSITION_SOLID_COLOR;
+    composeDev->layer[0].displayFrame = {0, 0, mWidth, mHeight};
+    composeDev->layer[0].crop = {0.0f, 0.0f, static_cast<float>(mWidth),
+                                 static_cast<float>(mHeight)};
+    composeDev->layer[0].blendMode = HWC2_BLEND_MODE_NONE;
+    composeDev->layer[0].alpha = 1.0f;
+    composeDev->layer[0].color = {0, 255, 0, 255};
+    composeDev->layer[0].transform = HWC_TRANSFORM_NONE;
+
+    mFb->resetGuestPostedAFrame();
+    EXPECT_TRUE(
+        mFb->compose(static_cast<uint32_t>(composeBuf.size()), composeBuf.data(), /*post=*/true));
+    EXPECT_FALSE(mFb->hasGuestPostedAFrame());
+
+    // The composition itself still happened.
+    std::vector<uint8_t> readPixels(static_cast<size_t>(mWidth) * mHeight * 4, 0);
+    mFb->readColorBuffer(targetHandle, 0, 0, mWidth, mHeight, GfxstreamFormat::R8G8B8A8_UNORM,
+                         readPixels.data(), readPixels.size());
+    EXPECT_EQ(0u, readPixels[0]);
+    EXPECT_EQ(255u, readPixels[1]);
+    EXPECT_EQ(0u, readPixels[2]);
+    EXPECT_EQ(255u, readPixels[3]);
+
+    mFb->closeColorBuffer(targetHandle);
+}
+#endif
+
+TEST_F(FrameBufferTest, ComposePostsDisplay0AndDisplay6ToSeparatePostCallbacks) {
+    const int kOuterWidth = 128;
+    const int kOuterHeight = 320;
+    HandleType innerHandle =
+        mFb->createColorBuffer(mWidth, mHeight, GfxstreamFormat::R8G8B8A8_UNORM);
+    ASSERT_NE((HandleType)0, innerHandle);
+    EXPECT_EQ(0, mFb->openColorBuffer(innerHandle));
+
+    HandleType outerHandle =
+        mFb->createColorBuffer(kOuterWidth, kOuterHeight, GfxstreamFormat::R8G8B8A8_UNORM);
+    ASSERT_NE((HandleType)0, outerHandle);
+    EXPECT_EQ(0, mFb->openColorBuffer(outerHandle));
+
+    uint32_t outerDisplayId = 6;
+    ASSERT_EQ(0, mFb->createDisplay(&outerDisplayId));
+    ASSERT_EQ(6u, outerDisplayId);
+    ASSERT_EQ(0, mFb->setDisplayPose(6, 0, 0, kOuterWidth, kOuterHeight, 420));
+
+    struct PostContext {
+        int count = 0;
+        uint32_t displayId = 99;
+        int width = 0;
+        int height = 0;
+    } innerCtx, outerCtx;
+
+    auto onPostCb = +[](void* context, uint32_t displayId, int width, int height, int /*ydir*/,
+                        int /*format*/, int /*type*/, unsigned char* /*pixels*/) {
+        auto* ctx = static_cast<PostContext*>(context);
+        ++ctx->count;
+        ctx->displayId = displayId;
+        ctx->width = width;
+        ctx->height = height;
+    };
+
+    mFb->setPostCallback(onPostCb, &innerCtx, /*displayId=*/0, /*useBgraReadback=*/false);
+    mFb->setPostCallback(onPostCb, &outerCtx, /*displayId=*/6, /*useBgraReadback=*/false);
+
+    std::vector<uint8_t> composeBuf(sizeof(ComposeDevice_v2) + sizeof(ComposeLayer), 0);
+    auto* composeDev = reinterpret_cast<ComposeDevice_v2*>(composeBuf.data());
+    composeDev->version = 2;
+    composeDev->displayId = 6;
+    composeDev->targetHandle = outerHandle;
+    composeDev->numLayers = 1;
+    composeDev->layer[0].cbHandle = 0;
+    composeDev->layer[0].composeMode = HWC2_COMPOSITION_SOLID_COLOR;
+    composeDev->layer[0].displayFrame = {0, 0, kOuterWidth, kOuterHeight};
+    composeDev->layer[0].crop = {0.0f, 0.0f, static_cast<float>(kOuterWidth),
+                                 static_cast<float>(kOuterHeight)};
+    composeDev->layer[0].blendMode = HWC2_BLEND_MODE_NONE;
+    composeDev->layer[0].alpha = 1.0f;
+    composeDev->layer[0].color = {0, 255, 0, 255};
+    composeDev->layer[0].transform = HWC_TRANSFORM_NONE;
+
+    mFb->resetGuestPostedAFrame();
+    // Not a pixel-fold device: only display 0 is ever posted.
+    EXPECT_TRUE(
+        mFb->compose(static_cast<uint32_t>(composeBuf.size()), composeBuf.data(), /*post=*/true));
+    EXPECT_FALSE(mFb->hasGuestPostedAFrame());
+
+    struct ScopedDisplayOps {
+        gfxstream_multi_display_ops saved = get_gfxstream_multi_display_operations();
+        ~ScopedDisplayOps() { set_gfxstream_multi_display_operations(saved); }
+    } scopedOps;
+    gfxstream_multi_display_ops pixelFoldOps = scopedOps.saved;
+    pixelFoldOps.is_pixel_fold = []() { return true; };
+    set_gfxstream_multi_display_operations(pixelFoldOps);
+
+    // Virtual display 1 does not post onto either physical console buffer.
+    composeDev->displayId = 1;
+    EXPECT_TRUE(
+        mFb->compose(static_cast<uint32_t>(composeBuf.size()), composeBuf.data(), /*post=*/true));
+    EXPECT_FALSE(mFb->hasGuestPostedAFrame());
+
+    // Outer display 6 posts exclusively to m_onPost[6] and primes its PBO ring on the very
+    // first frame so static outer screens do not wait 3 frames before firing doPostCallback.
+    composeDev->displayId = 6;
+    composeDev->targetHandle = outerHandle;
+    EXPECT_TRUE(
+        mFb->compose(static_cast<uint32_t>(composeBuf.size()), composeBuf.data(), /*post=*/true));
+    EXPECT_TRUE(mFb->hasGuestPostedAFrame());
+    if (!mUseSubWindow) {
+        EXPECT_EQ(0, innerCtx.count);
+        EXPECT_EQ(1, outerCtx.count);
+        EXPECT_EQ(6u, outerCtx.displayId);
+        EXPECT_EQ(kOuterWidth, outerCtx.width);
+        EXPECT_EQ(kOuterHeight, outerCtx.height);
+
+        // A subsequent non-primed frame marks hasUnflushedFrame; flushReadPipeline(6) delivers it
+        // once and a repeat flush is a no-op.
+        EXPECT_TRUE(mFb->compose(static_cast<uint32_t>(composeBuf.size()), composeBuf.data(),
+                                 /*post=*/true));
+        if (mFb->asyncReadbackSupported()) {
+            mFb->flushReadPipeline(0);
+            mFb->flushReadPipeline(6);
+            const int countAfterFlush = outerCtx.count;
+            EXPECT_GE(countAfterFlush, 2);
+            mFb->flushReadPipeline(6);
+            EXPECT_EQ(countAfterFlush, outerCtx.count);
+        }
+        EXPECT_EQ(0, innerCtx.count);
+    }
+
+    // Inner display 0 posts exclusively to m_onPost[0], leaving m_onPost[6] untouched.
+    const int outerCountBeforeInner = outerCtx.count;
+    composeDev->displayId = 0;
+    composeDev->targetHandle = innerHandle;
+    composeDev->layer[0].displayFrame = {0, 0, mWidth, mHeight};
+    composeDev->layer[0].crop = {0.0f, 0.0f, static_cast<float>(mWidth),
+                                 static_cast<float>(mHeight)};
+    EXPECT_TRUE(
+        mFb->compose(static_cast<uint32_t>(composeBuf.size()), composeBuf.data(), /*post=*/true));
+    if (!mUseSubWindow) {
+        if (mFb->asyncReadbackSupported()) {
+            mFb->flushReadPipeline(0);
+            mFb->flushReadPipeline(6);
+        }
+        EXPECT_GE(innerCtx.count, 1);
+        EXPECT_EQ(0u, innerCtx.displayId);
+        EXPECT_EQ(mWidth, innerCtx.width);
+        EXPECT_EQ(mHeight, innerCtx.height);
+        EXPECT_EQ(outerCountBeforeInner, outerCtx.count);
+    }
+
+    mFb->setPostCallback(nullptr, nullptr, /*displayId=*/6);
+    mFb->setPostCallback(nullptr, nullptr, /*displayId=*/0);
+    mFb->destroyDisplay(6);
+    mFb->closeColorBuffer(outerHandle);
+    mFb->closeColorBuffer(innerHandle);
 }
 
 }  // namespace

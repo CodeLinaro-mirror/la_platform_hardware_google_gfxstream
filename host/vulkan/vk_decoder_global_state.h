@@ -189,6 +189,10 @@ class VkDecoderGlobalState {
         gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
         VkPhysicalDevice physicalDevice, uint32_t* pQueueFamilyPropertyCount,
         VkQueueFamilyProperties2* pQueueFamilyProperties);
+    void on_vkGetPhysicalDeviceQueueFamilyProperties2KHR(
+        gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
+        VkPhysicalDevice physicalDevice, uint32_t* pQueueFamilyPropertyCount,
+        VkQueueFamilyProperties2* pQueueFamilyProperties);
 
     // Override memory types advertised from host
     //
@@ -515,6 +519,11 @@ class VkDecoderGlobalState {
                                   VkCommandBuffer commandBuffer,
                                   const VkDependencyInfo* pDependencyInfo);
 
+    void on_vkCmdPipelineBarrier2KHR(gfxstream::base::BumpPool* pool,
+                                     VkSnapshotApiCallHandle apiCallHandle,
+                                     VkCommandBuffer commandBuffer,
+                                     const VkDependencyInfo* pDependencyInfo);
+
     void on_vkCmdWaitEvents(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
                             VkCommandBuffer commandBuffer, uint32_t eventCount,
                             const VkEvent* pEvents, VkPipelineStageFlags srcStageMask,
@@ -556,8 +565,23 @@ class VkDecoderGlobalState {
                             VkDevice device, VkDeviceMemory memory, VkDeviceSize offset,
                             VkDeviceSize size, VkMemoryMapFlags flags, void** ppData);
 
+    VkResult on_vkMapMemory2(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
+                             VkDevice device, const VkMemoryMapInfo* pMemoryMapInfo, void** ppData);
+
+    VkResult on_vkMapMemory2KHR(gfxstream::base::BumpPool* pool,
+                                VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
+                                const VkMemoryMapInfo* pMemoryMapInfo, void** ppData);
+
     void on_vkUnmapMemory(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
                           VkDevice device, VkDeviceMemory memory);
+
+    VkResult on_vkUnmapMemory2(gfxstream::base::BumpPool* pool,
+                               VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
+                               const VkMemoryUnmapInfo* pMemoryUnmapInfo);
+
+    VkResult on_vkUnmapMemory2KHR(gfxstream::base::BumpPool* pool,
+                                  VkSnapshotApiCallHandle apiCallHandle, VkDevice device,
+                                  const VkMemoryUnmapInfo* pMemoryUnmapInfo);
 
     uint8_t* getMappedHostPointer(VkDeviceMemory memory);
     VkDeviceSize getDeviceMemorySize(VkDeviceMemory memory);
@@ -630,6 +654,11 @@ class VkDecoderGlobalState {
     VkResult on_vkQueueSubmit2(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
                                VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
                                VkFence fence);
+
+    VkResult on_vkQueueSubmit2KHR(gfxstream::base::BumpPool* pool,
+                                  VkSnapshotApiCallHandle apiCallHandle, VkQueue queue,
+                                  uint32_t submitCount, const VkSubmitInfo2* pSubmits,
+                                  VkFence fence);
 
     VkResult on_vkQueueWaitIdle(gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,
                                 VkQueue queue);
@@ -1009,14 +1038,14 @@ class VkDecoderGlobalState {
     void on_DeviceLost();
 
     // Fence waits
-    VkResult waitForFence(VkFence boxed_fence, uint64_t timeout);
+    VkResult waitForFence(Boxed<VkFence> boxed_fence, uint64_t timeout);
 
     // Wait for present (vkQueueSignalReleaseImageANDROID). This explicitly
     // requires the image to be presented again versus how many times it's been
     // presented so far, so it ends up incrementing a "target present count"
     // for this image, and then waiting for the image to get vkQSRI'ed at least
     // that many times.
-    AsyncResult registerQsriCallback(VkImage boxed_image, VkQsriTimeline::Callback callback);
+    AsyncResult registerQsriCallback(Boxed<VkImage> boxed_image, VkQsriTimeline::Callback callback);
 
     // Transformations
     void deviceMemoryTransform_tohost(VkDeviceMemory* memory, uint32_t memoryCount,
